@@ -1,0 +1,13 @@
+# 建议使用的核心库
+pandas
+numpy
+matplotlib
+seaborn
+scipy
+statsmodels
+pyarrow # 用于读写Parquet文件
+openpyxl # 用于读写Excel文件
+polars # Polars DataFrame 库
+
+# 用于构建Rust-Python包
+maturin
