@@ -1,4 +1,10 @@
 # LongGangTrader
+
+
+!!!!大家记得在自己的branch中提交代码!!!
+
+我们每周把大家的branch整合到main分支中
+
 #### 任务分工
 
 + 数据读写、预处理(LHH)
