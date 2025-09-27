@@ -1,0 +1,7 @@
+[build-system]
+requires = ["maturin>=1.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+# 明确告诉 maturin，Rust 项目的清单文件 (Cargo.toml) 在 rust_core 目录中
+manifest-path = "rust_core/Cargo.toml"
