@@ -4,13 +4,14 @@ import polars as pl
 # 尝试导入由 PyO3 构建的 Rust 核心模块
 # 在运行前，需要先在项目根目录执行 `maturin develop`
 try:
-    # from rust_core import run_backtest_rs
-    # 暂时注释掉导入，避免未知符号错误
-    run_backtest_rs = None
+    # 导入 Rust 模块中定义的函数和类
+    from rust_core import run_vectorized_backtest_rs, BacktestConfig # type: ignore
 except ImportError:
     print("错误: 无法导入 'rust_core' 模块。")
     print("请确保您已经在项目根目录下运行了 'maturin develop' 来编译和安装 Rust 核心。")
-    run_backtest_rs = None
+    # 如果导入失败，将它们设置为 None，以便在后续代码中进行检查
+    run_vectorized_backtest_rs = None
+    BacktestConfig = None
 
 class Backtester:
     """
@@ -34,7 +35,7 @@ class Backtester:
         执行回测。
         通过直接调用 Rust 函数来运行高性能的回测计算。
         """
-        if run_backtest_rs is None:
+        if run_backtest_rs is None: # type: ignore
             return
 
         # 1. 准备传递给 Rust 函数的数据
@@ -47,7 +48,7 @@ class Backtester:
         # 2. 直接调用 Rust 函数，传递 Polars DataFrame
         try:
             # pyo3-polars 会处理 Polars DataFrame 的高效传递
-            result_pl = run_backtest_rs(signals_pl, data_pl)
+            result_pl = run_backtest_rs(signals_pl, data_pl) # type: ignore
             # 将返回的 Polars DataFrame 转换回 Pandas DataFrame
             self.portfolio_history = result_pl.to_pandas()
             print("Rust 回测成功完成。")
