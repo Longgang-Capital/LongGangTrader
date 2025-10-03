@@ -2,9 +2,9 @@ use pyo3::prelude::*;
 use polars::prelude::*;
 use pyo3_polars::{PyDataFrame};
 use std::collections::HashMap;
-// 新增: 声明 utils 模块，这会告诉 Rust 编译器去查找 src/utils.rs 文件
+
+// 声明并导入 utils 模块
 mod utils;
-// 新增: 导入 utils 模块中的所有公共项，方便直接使用
 use utils::*;
 /// 从 Python 传入的回测配置参数
 /// 使用 #[pyclass] 宏使其可以在 Python 中实例化
@@ -41,29 +41,42 @@ fn run_vectorized_backtest_rs(
     // --- 1. 数据准备和初始化 ---
     let signals: DataFrame = signals_df.into();
     let market_data: DataFrame = market_data_df.into();
-    // 对数据进行预处理，例如按日期排序，构建方便查询的数据结构 (e.g., HashMap<Date, HashMap<Symbol, Price>>)
+
+    // 将DataFrame转换为更易于按日期查找的HashMap结构
+    let market_data_map = preprocess_market_data(&market_data)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    let signals_map = preprocess_signals(&signals)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+    // 获取所有唯一的、排序后的交易日
+    let sorted_unique_dates = get_sorted_unique_dates(&market_data)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
     // --- 2. 初始化投资组合状态 (Portfolio State) ---
     let mut cash = config.initial_capital;
-    let mut total_equity = config.initial_capital;
-    let mut current_positions: HashMap<String, f64> = HashMap::new(); // symbol -> shares
+    let mut current_positions: PositionMap = HashMap::new(); // symbol -> shares
     let mut portfolio_history: Vec<PortfolioSnapshot> = Vec::new(); // 用于记录每日快照
-    let sorted_unique_dates = vec!["2023-01-01".to_string(), "2023-01-02".to_string()]; // 假设已获取
 
     // --- 3. 按时间顺序遍历交易日 (Main Loop) ---
     for date in sorted_unique_dates {
+        // 获取当日的市场价格数据，如果某天没有数据则跳过
+        let market_data_for_date = match market_data_map.get(&date) {
+            Some(data) => data,
+            None => continue, // 跳过没有市场数据的日期
+        };
+
         // a. 更新当前持仓市值 (Mark-to-Market)
-        let holdings_value = calculate_holdings_value(&current_positions, &HashMap::new() /* 示例数据 */);
-        total_equity = cash + holdings_value;
+        let holdings_value = calculate_holdings_value(&current_positions, market_data_for_date);
+        let total_equity = cash + holdings_value;
 
         // b. 获取当日的目标持仓权重
-        if let Some(target_weights) = get_target_weights_for_date(&HashMap::new() /* 示例数据 */, &date) {
+        if let Some(target_weights) = get_target_weights_for_date(&signals_map, &date) {
         
-            // c. 计算目标持仓 (调用 utils 函数)
+            // c. 计算目标持仓市值
             let target_values = calculate_target_positions_value(total_equity, target_weights);
             
-            // d. 生成交易 (调用 utils 函数)
-            let trades = calculate_trades(&current_positions, &target_values, &HashMap::new());
+            // d. 生成交易指令
+            let trades = calculate_trades(&current_positions, &target_values, market_data_for_date);
 
             // e. 执行交易并更新状态
             for trade in trades {
@@ -78,24 +91,18 @@ fn run_vectorized_backtest_rs(
 
         // f. 记录当日的投资组合快照
         portfolio_history.push(PortfolioSnapshot {
-             date: date.to_string(),
+             date: date.clone(),
              equity: total_equity,
              cash,
              holdings_value,
-             turnover_rate: 0.0, // 这里可以根据实际情况计算
-        //     // ... 其他需要记录的指标
+             turnover_rate:0.0, // 这里可以计算或后续分析
         });
     }
 
     // --- 4. 构建并返回结果 DataFrame ---
-    // let result_df = build_results_dataframe_from_history(&portfolio_history);
-    // Ok(PyDataFrame(result_df))
+    let result_df = build_results_dataframe_from_history(&portfolio_history)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
     
-    // 这是一个示例，返回一个模拟的结果 DataFrame
-    let dates = Series::new("date", &["2023-01-01", "2023-01-02", "2023-01-03"]);
-    let equity = Series::new("equity", &[config.initial_capital, 1000500.0, 1001000.0]);
-    let result_df = DataFrame::new(vec![dates, equity]).unwrap();
-
     Ok(PyDataFrame(result_df))
 }
 

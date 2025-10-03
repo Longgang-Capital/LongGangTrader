@@ -35,12 +35,17 @@ class Backtester:
         执行回测。
         通过直接调用 Rust 函数来运行高性能的回测计算。
         """
-        if run_backtest_rs is None: # type: ignore
+        if run_vectorized_backtest_rs is None: # type: ignore
             return
 
         # 1. 准备传递给 Rust 函数的数据
         signals = self.strategy.generate_signals_for_all_dates() # 假设策略返回 Pandas DataFrame
 
+        # 创建回测配置对象
+        config = BacktestConfig(
+            initial_capital=self.initial_capital,
+            transaction_cost_pct=self.transaction_cost
+        ) # pyright: ignore[reportOptionalCall]
         # 将 Pandas DataFrame 转换为 Polars DataFrame
         signals_pl = pl.from_pandas(signals)
         data_pl = pl.from_pandas(self.data)
@@ -48,7 +53,7 @@ class Backtester:
         # 2. 直接调用 Rust 函数，传递 Polars DataFrame
         try:
             # pyo3-polars 会处理 Polars DataFrame 的高效传递
-            result_pl = run_backtest_rs(signals_pl, data_pl) # type: ignore
+            result_pl = run_vectorized_backtest_rs(signals_pl, data_pl, config) # type: ignore
             # 将返回的 Polars DataFrame 转换回 Pandas DataFrame
             self.portfolio_history = result_pl.to_pandas()
             print("Rust 回测成功完成。")
