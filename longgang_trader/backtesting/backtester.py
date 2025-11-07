@@ -17,7 +17,7 @@ class Backtester:
     """
     回测引擎，用于评估策略的历史表现。
     """
-    def __init__(self, strategy, data, initial_capital, transaction_cost):
+    def __init__(self, strategy, data, config:dict):
         """
         :param strategy: 交易策略对象。
         :param data: 行情数据 (Pandas DataFrame)。
@@ -26,8 +26,13 @@ class Backtester:
         """
         self.strategy = strategy
         self.data = data
-        self.initial_capital = initial_capital
-        self.transaction_cost = transaction_cost
+        self.config = config
+        self.initial_capital = config.get("initial_capital", 1_000_000)
+        self.transaction_cost = config.get("transaction_cost", 0.001)  # 0.1%
+        self.symbol_col = config.get("symbol_col", "symbol")
+        self.date_col = config.get("date_col", "date")
+        self.close_col = config.get("close_col", "close")
+
         self.portfolio_history = None
 
     def run_backtest(self):
@@ -44,7 +49,10 @@ class Backtester:
         # 创建回测配置对象
         config = BacktestConfig(
             initial_capital=self.initial_capital,
-            transaction_cost_pct=self.transaction_cost
+            transaction_cost_pct=self.transaction_cost,
+            symbol_col=self.symbol_col,
+            date_col=self.date_col,
+            close_col=self.close_col
         ) # pyright: ignore[reportOptionalCall]
         # 将 Pandas DataFrame 转换为 Polars DataFrame
         signals_pl = pl.from_pandas(signals)

@@ -16,13 +16,22 @@ pub struct BacktestConfig {
     
     #[pyo3(get, set)]
     pub transaction_cost_pct: f64, // 明确这是百分比成本
+    
+    #[pyo3(get, set)]
+    pub symbol_col: String,
+
+    #[pyo3(get, set)]
+    pub date_col: String,
+
+    #[pyo3(get, set)]
+    pub close_col: String,
 }
 
 #[pymethods]
 impl BacktestConfig {
     #[new] // 这个构造函数允许在 Python 中通过 `BacktestConfig()` 创建实例
-    fn new(initial_capital: f64, transaction_cost_pct: f64) -> Self {
-        BacktestConfig { initial_capital, transaction_cost_pct }
+    fn new(initial_capital: f64, transaction_cost_pct: f64, symbol_col: String, date_col: String, close_col: String) -> Self {
+        BacktestConfig { initial_capital, transaction_cost_pct, symbol_col, date_col, close_col }
     }
 }
 /// Rust 实现的高性能向量化回测函数
@@ -43,13 +52,13 @@ fn run_vectorized_backtest_rs(
     let market_data: DataFrame = market_data_df.into();
 
     // 将DataFrame转换为更易于按日期查找的HashMap结构
-    let market_data_map = preprocess_market_data(&market_data)
+    let market_data_map = preprocess_market_data(&market_data, config)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    let signals_map = preprocess_signals(&signals)
+    let signals_map = preprocess_signals(&signals, config)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
     // 获取所有唯一的、排序后的交易日
-    let sorted_unique_dates = get_sorted_unique_dates(&market_data)
+    let sorted_unique_dates = get_sorted_unique_dates(&market_data, config)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
     // --- 2. 初始化投资组合状态 (Portfolio State) ---
