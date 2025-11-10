@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 use polars::prelude::*;
-use pyo3_polars::{PyDataFrame};
+use pyo3_polars::{PyDataFrame, PyLazyFrame};
 use std::collections::HashMap;
 
 // 声明并导入 utils 模块
@@ -35,21 +35,27 @@ impl BacktestConfig {
     }
 }
 /// Rust 实现的高性能向量化回测函数
-/// 
-/// :param signals_df: Polars DataFrame，包含['date', 'symbol', 'target_weight']等列
-/// :param market_data_df: Polars DataFrame，包含['date', 'symbol', 'close']等列
+///
+/// :param signals_lf: Polars LazyFrame，包含['date', 'symbol', 'target_weight']等列
+/// :param market_data_lf: Polars LazyFrame，包含['date', 'symbol', 'close']等列
 /// :param config: BacktestConfig 对象，包含回测参数
 /// :return: Polars DataFrame，包含每日的投资组合历史记录
 #[pyfunction]
 fn run_vectorized_backtest_rs(
-    signals_df: PyDataFrame, 
-    market_data_df: PyDataFrame,
+    signals_lf: PyLazyFrame,
+    market_data_lf: PyLazyFrame,
     config: &BacktestConfig
 ) -> PyResult<PyDataFrame> {
 
     // --- 1. 数据准备和初始化 ---
-    let signals: DataFrame = signals_df.into();
-    let market_data: DataFrame = market_data_df.into();
+    let signals_lazy: LazyFrame = signals_lf.into();
+    let market_data_lazy: LazyFrame = market_data_lf.into();
+
+    // 将LazyFrame转换为DataFrame进行处理（保持现有逻辑，后续可优化为纯LazyFrame操作）
+    let signals: DataFrame = signals_lazy.collect()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    let market_data: DataFrame = market_data_lazy.collect()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
     // 将DataFrame转换为更易于按日期查找的HashMap结构
     let market_data_map = preprocess_market_data(&market_data, config)

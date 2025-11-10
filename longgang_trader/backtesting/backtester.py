@@ -54,13 +54,13 @@ class Backtester:
             date_col=self.date_col,
             close_col=self.close_col
         ) # pyright: ignore[reportOptionalCall]
-        # 将 Pandas DataFrame 转换为 Polars DataFrame
-        signals_pl = pl.from_pandas(signals)
-        data_pl = pl.from_pandas(self.data)
+        # 将 Pandas DataFrame 转换为 Polars LazyFrame
+        signals_pl = pl.from_pandas(signals).lazy()
+        data_pl = pl.from_pandas(self.data).lazy()
 
-        # 2. 直接调用 Rust 函数，传递 Polars DataFrame
+        # 2. 直接调用 Rust 函数，传递 Polars LazyFrame
         try:
-            # pyo3-polars 会处理 Polars DataFrame 的高效传递
+            # pyo3-polars 会处理 Polars LazyFrame 的高效传递
             result_pl = run_vectorized_backtest_rs(signals_pl, data_pl, config) # type: ignore
             # 将返回的 Polars DataFrame 转换回 Pandas DataFrame
             self.portfolio_history = result_pl.to_pandas()
