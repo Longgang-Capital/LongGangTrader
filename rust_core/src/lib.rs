@@ -25,13 +25,17 @@ pub struct BacktestConfig {
 
     #[pyo3(get, set)]
     pub close_col: String,
+
+    #[pyo3(get, set)]
+    pub weight_col: String,
 }
 
 #[pymethods]
 impl BacktestConfig {
     #[new] // 这个构造函数允许在 Python 中通过 `BacktestConfig()` 创建实例
-    fn new(initial_capital: f64, transaction_cost_pct: f64, symbol_col: String, date_col: String, close_col: String) -> Self {
-        BacktestConfig { initial_capital, transaction_cost_pct, symbol_col, date_col, close_col }
+    fn new(initial_capital: f64, transaction_cost_pct: f64, 
+        symbol_col: String, date_col: String, close_col: String, weight_col: String) -> Self {
+        BacktestConfig { initial_capital, transaction_cost_pct, symbol_col, date_col, close_col, weight_col }
     }
 }
 /// Rust 实现的高性能向量化回测函数

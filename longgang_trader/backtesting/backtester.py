@@ -32,6 +32,7 @@ class Backtester:
         self.symbol_col = config.get("symbol_col", "symbol")
         self.date_col = config.get("date_col", "date")
         self.close_col = config.get("close_col", "close")
+        self.weight_col = config.get("weight_col", "target_weight")
 
         self.portfolio_history = None
 
@@ -52,7 +53,8 @@ class Backtester:
             transaction_cost_pct=self.transaction_cost,
             symbol_col=self.symbol_col,
             date_col=self.date_col,
-            close_col=self.close_col
+            close_col=self.close_col,
+            weight_col=self.weight_col
         ) # pyright: ignore[reportOptionalCall]
         # 将 Pandas DataFrame 转换为 Polars LazyFrame
         signals_pl = pl.from_pandas(signals).lazy()
