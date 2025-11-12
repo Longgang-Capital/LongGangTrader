@@ -1,3 +1,4 @@
+
 # LongGangTrader
 
 !!!!大家记得在自己的branch中提交代码!!!

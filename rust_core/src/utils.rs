@@ -81,7 +81,7 @@ pub fn preprocess_signals(df: &DataFrame, config: &BacktestConfig) -> PolarsResu
     let mut map = HashMap::new();
     let date_col = get_date_column_as_string(df, &config.date_col)?;
     let symbol_col = df.column(&config.symbol_col)?.str()?;
-    let weight_col = df.column("target_weight")?.f64()?;
+    let weight_col = df.column(&config.weight_col)?.f64()?;
 
     for i in 0..df.height() {
         let date = date_col.get(i).unwrap().to_string();

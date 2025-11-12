@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 *.pyd
 *.parquet
+*.pdf
 .Python
 env/
 venv/
