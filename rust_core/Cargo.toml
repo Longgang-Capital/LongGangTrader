@@ -1,0 +1,13 @@
+[package]
+name = "rust_core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rust_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.21.0", features = ["extension-module"] }
+polars = { version = "0.40.0", features = ["lazy"] }
+pyo3-polars = { version = "^0.14.0" }

@@ -1,0 +1,1 @@
+# d:\Notes\Project\LongGangTrader\longgang_trader\data\__init__.py
