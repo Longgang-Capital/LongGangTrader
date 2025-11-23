@@ -1,0 +1,5 @@
+outs:
+- md5: 49078be6f72773ac710d1be44c4853d4
+  size: 1745
+  hash: md5
+  path: gru_attention.py

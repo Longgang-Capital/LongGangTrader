@@ -1,0 +1,7 @@
+[core]
+    remote = myoss
+['remote "myoss"']
+    url = oss://longgang-capital/dvc
+    oss_endpoint = "oss-cn-shenzhen.aliyuncs.com"
+    oss_key_id = "LTAI5tNuYYepNbUbQwtyhAwB"
+    oss_key_secret = "krAJT07rkpgtHcZwqL7Moc7QVTFRI0"
