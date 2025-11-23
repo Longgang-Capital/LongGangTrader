@@ -1,0 +1,26 @@
+mode: 'single'
+path_root: '/local/yjhuang/qlib_data'
+
+#train
+model: "AttentionGRU"
+model_name: "AttentionGRU1109_v1"
+runname_suffix: ""
+batch_size: 10000
+num_workers: 8
+n_epochs: 1000
+log_interval: 2000
+lr: 0.001
+alpha: 0.01
+patience: 100
+gpu: 0
+need_train_log: false
+
+labels_interval: "1day"
+universe: "None"
+loss_fn: "MSE"
+
+# infer
+ckpt_path: /local/yjhuang/qlib_data/ckpt
+mode: "test"
+model_path: 'AttentionGRU.pt'
+output_file: './preds_full.bin'
