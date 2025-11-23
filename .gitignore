@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.parquet
+*.pdf
 .Python
 env/
 venv/
@@ -17,6 +19,6 @@ build/
 # Rust
 # 忽略 rust_core 项目中的 target 目录
 /rust_core/target/
-
+/notebooks/test_data.parquet
 # Cargo.lock 应该被提交，以保证依赖版本一致性
 # !/rust_core/Cargo.lock
