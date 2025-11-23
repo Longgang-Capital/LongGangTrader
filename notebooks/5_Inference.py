@@ -8,26 +8,129 @@
 
 import sys
 from pathlib import Path
-from typing import Optional, Dict, Tuple, List
+from typing import Optional, Dict, Tuple, List, Union
 
 import torch
 import torch.nn as nn
 import numpy as np
 from tqdm.auto import tqdm
+import json
+import os
+import argparse
+import yaml
 
 # 你自己的 dataloader
 from DailyAlphaDataloader import get_infer_dataloaders  # 日频的那个版本
-from py3lib import taskbase, sarray
 
-# ================== 全局配置 ==================
-task = taskbase.TaskBase()
-task.get_options({'sap_cache_dir': '/local/sap/sapcache_1m_2020_rs'})
+PathLike = Union[str, Path]
+
+# ================== yml 配置读取 ==================
+def load_config(yml_path: str | Path) -> dict:
+    yml_path = Path(yml_path)
+    with yml_path.open("r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    if cfg is None:
+        cfg = {}
+    return cfg
+
+
+# ========= 1. dtype 解析（给 load_sarray_data 用，保留） =========
+def _conv_dtype(_dtype):
+
+    if isinstance(_dtype, str):
+        return _dtype
+    elif isinstance(_dtype, list):
+        if len(_dtype) == 2:
+            if isinstance(_dtype[1], int):
+                return (_conv_dtype(_dtype[0]), _dtype[1])
+            elif isinstance(_dtype[1], list) and _dtype[1] and isinstance(_dtype[1][0], int):
+                return (_conv_dtype(_dtype[0]), tuple(_dtype[1]))
+        # 结构化 dtype
+        ret = []
+        for field in _dtype:
+            if len(field) == 3:
+                ret.append((
+                    field[0],
+                    _conv_dtype(field[1]),
+                    field[2] if isinstance(field[2], int) else tuple(field[2])
+                ))
+            elif len(field) == 2:
+                ret.append((field[0], _conv_dtype(field[1])))
+            else:
+                raise Exception(f"failed to parse dtype: {_dtype}")
+        return ret
+    else:
+        raise Exception(f"failed to parse dtype: {_dtype}")
+
+
+# ========= 2. 带 !include 的 json 加载（给 load_sarray_data 用，保留） =========
+class _JsonLoader:
+    """支持 !include 语法的 json loader，避免递归 include 死循环"""
+
+    def __init__(self) -> None:
+        self._loaded = set()
+
+    def load(self, jsonfile: PathLike) -> dict:
+        p = Path(jsonfile)
+        data = json.load(p.open('r', encoding='utf8'))
+        self._loaded.add(str(p.resolve()))
+
+        if '!include' in data:
+            inc = data.pop('!include')
+            inc_path = Path(inc) if os.path.isabs(inc) else p.parent / inc
+            inc_abs = str(inc_path.resolve())
+
+            if inc_abs not in self._loaded:
+                self._loaded.add(inc_abs)
+                parent_data = self.load(inc_path)
+                parent_data.update(data)
+                data = parent_data
+
+        return data
+
+
+def load_json(filename: PathLike) -> dict:
+    loader = _JsonLoader()
+    return loader.load(filename)
+
+def load_sarray_data(datafile: PathLike,
+                     copy_on_write: bool = True,
+                     offset: int = 0) -> np.ndarray:
+    datafile = Path(datafile)
+    jsonfile = Path(str(datafile) + '.json')
+
+    if not jsonfile.exists():
+        raise FileNotFoundError(f"json file not found: {jsonfile}")
+
+    attr = load_json(jsonfile)
+
+    # dtype
+    raw_dtype = attr.get('dtype')
+    if raw_dtype is None:
+        raise ValueError(f"`dtype` not found in {jsonfile}")
+    dtype_align = attr.get('dtype_align', True)
+    dtype = np.dtype(_conv_dtype(raw_dtype), align=dtype_align)
+
+    # shape
+    shape: List[int] = attr.get('shape', [])
+    real_offset = offset or attr.get('offset', 0)
+
+    if not shape:
+        fsize = datafile.stat().st_size - real_offset
+        if fsize % dtype.itemsize != 0:
+            raise ValueError(f"file size {fsize} not divisible by itemsize {dtype.itemsize}")
+        shape = [fsize // dtype.itemsize]
+
+    mode = 'c' if copy_on_write else 'r'
+    arr = np.memmap(datafile, dtype=dtype, mode=mode,
+                    shape=tuple(shape), offset=real_offset)
+    return arr
 
 
 # ================== 模型定义（跟训练保持一致） ==================
 class AttentionGRURes(nn.Module):
     """
-    结构与研报一致的轻量Attention + GRU + Res + FFN：
+    Attention + GRU + Res + FFN：
     """
     def __init__(self, input_dim=158, hidden_dim=128, num_layers=1, dropout=0.1):
         super().__init__()
@@ -71,12 +174,7 @@ def _infer_on_loader_into_global(
     long_di_list: List[np.ndarray],
     long_ii_list: List[np.ndarray],
 ):
-    """
-    dataloader: 返回 (X, y, di, ii)
-    global_preds: (total_di, ii_max) 的大矩阵
-    di_offset: 当前 split 的 di 在全局里的起始位置
-    其余四个 list 用来拼“长表”
-    """
+
     model.eval()
     _di = dataloader.dataset.di
     _ii = dataloader.dataset.ii
@@ -86,16 +184,10 @@ def _infer_on_loader_into_global(
         for X_batch, y_batch, di_batch, ii_batch in tqdm(dataloader, desc=f"推理中[{split_name}]"):
             X_batch = X_batch.to(device, non_blocking=True)
 
-            # (B,)
             y_pred = model(X_batch).view(-1).detach().cpu().numpy().astype(np.float32)
-
-
-            # 转成 numpy
             y_true = y_batch.numpy().reshape(-1).astype(np.float32)
             di_np = di_batch.numpy().astype(np.int64) + di_offset   # 全局 di
             ii_np = ii_batch.numpy().astype(np.int64)
-
-            print(f"{y_pred=}, {di_np=}, {ii_np=}")
 
             # 填进全局大矩阵里
             global_preds[di_np, ii_np] = y_pred
@@ -128,7 +220,7 @@ def inference_all_splits(
         device = torch.device("cpu")
     print(f"推理设备: {device}")
 
-    # 拿到 train/val/test loader（都是你日频那个） :contentReference[oaicite:3]{index=3}
+    # dataloader
     train_loader, val_loader, test_loader = get_infer_dataloaders(
         data_root,
         batch_size=batch_size,
@@ -151,7 +243,7 @@ def inference_all_splits(
     val_di   = val_loader.dataset.di   if val_loader is not None else 0
     test_di  = test_loader.dataset.di  if test_loader is not None else 0
 
-    # ii 最好取三个里的最大值，保险
+    # ii 取三个里的最大值
     ii_max = 0
     for ld in [train_loader, val_loader, test_loader]:
         if ld is not None:
@@ -191,7 +283,7 @@ def inference_all_splits(
             global_preds, di_offset,
             long_pred_list, long_tgt_list, long_di_list, long_ii_list,
         )
-        di_offset += train_di  # 下一个 split 往后排
+        di_offset += train_di
 
     # 2) val
     if val_loader is not None:
@@ -210,13 +302,12 @@ def inference_all_splits(
             long_pred_list, long_tgt_list, long_di_list, long_ii_list,
         )
 
-    # ========== 拼长表 ==========
+    # ========== 拼长表（内存里用，暂时不存盘）==========
     preds_flat = np.concatenate(long_pred_list, axis=0)
     tgts_flat  = np.concatenate(long_tgt_list, axis=0)
     di_flat    = np.concatenate(long_di_list, axis=0)
     ii_flat    = np.concatenate(long_ii_list, axis=0)
 
-    # 打个包方便调试
     out_dict = {
         "preds_flat": preds_flat,
         "tgts_flat": tgts_flat,
@@ -225,45 +316,65 @@ def inference_all_splits(
         "preds_2d": global_preds,
     }
 
-    # 保存
+    # 保存 2D 矩阵（完全不依赖 sarray，用 np.save）
     if output_file is not None:
         out_path = Path(output_file)
-        # 1) 保存长表
-        # stacked = np.stack(
-        #     [preds_flat, tgts_flat, di_flat.astype(np.float32), ii_flat.astype(np.float32)],
-        #     axis=1,
-        # )  # (N, 4)
-        # sarray.save_ndarray(stacked, out_path)
-        # print(f"已保存长表到 {out_path}, shape={stacked.shape}")
-
-        # 2) 再存一个 2D 的
-        # mat_path = out_path.with_name(out_path.stem + "_by_di_ii" + out_path.suffix)
-        sarray.save_ndarray(global_preds, output_file)
-        print(f"已保存2D预测矩阵到 {output_file}, shape={global_preds.shape}")
+        np.save(out_path, global_preds)
+        print(f"已保存2D预测矩阵到 {out_path}, shape={global_preds.shape}")
 
     return out_dict
 
 
+# ================== 参数解析（只传 config.yml） ==================
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="使用 AttentionGRURes 对 train/val/test 做日频推理（yml 配置版）"
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="推理配置 yml 路径"
+    )
+    return parser.parse_args()
+
+
 def main():
-    # 按你 task.options 的风格来一版
-    data_root = task.options.path_root
-    if torch.cuda.is_available():
-        device = f"cuda:{int(task.options.gpu)}"
+    args = parse_args()
+    cfg = load_config(args.config)
+
+    # 从 yml 中取参数，提供合理默认值
+    model_path   = cfg["model_path"]
+    data_root    = cfg["path_root"]
+    batch_size   = cfg.get("batch_size", 256)
+    num_workers  = cfg.get("num_workers", 4)
+    universe     = cfg.get("universe", None)
+    seq_len      = cfg.get("seq_len", 60)
+    hidden_dim   = cfg.get("hidden_dim", 128)
+    num_layers   = cfg.get("num_layers", 1)
+    dropout      = cfg.get("dropout", 0.1)
+    output_file  = cfg.get("output_file", None)
+
+    # device / gpu
+    if "device" in cfg:
+        device = cfg["device"]
+    elif "gpu" in cfg and torch.cuda.is_available():
+        device = f"cuda:{int(cfg['gpu'])}"
     else:
         device = "cpu"
 
     inference_all_splits(
-        model_path=task.options.model_path,
+        model_path=model_path,
         data_root=data_root,
-        batch_size=task.options.batch_size,
-        num_workers=task.options.num_workers,
-        universe=getattr(task.options, "universe", None),
-        seq_len=getattr(task.options, "seq_len", 60),
-        hidden_dim=getattr(task.options, "hidden_dim", 128),
-        num_layers=getattr(task.options, "num_layers", 1),
-        dropout=getattr(task.options, "dropout", 0.1),
+        batch_size=batch_size,
+        num_workers=num_workers,
+        universe=universe,
+        seq_len=seq_len,
+        hidden_dim=hidden_dim,
+        num_layers=num_layers,
+        dropout=dropout,
         device=device,
-        output_file=getattr(task.options, "output_file", None),
+        output_file=output_file,
     )
 
 
