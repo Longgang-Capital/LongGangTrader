@@ -1,5 +1,13 @@
 import pandas as pd
 import polars as pl
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from datetime import datetime
+
+# 全局设置中文显示
+plt.rcParams["font.family"] = ["SimHei","Microsoft YaHei"] # 设置中文字体
+plt.rcParams["axes.unicode_minus"] = False  # 正确显示负号
 
 # 尝试导入由 PyO3 构建的 Rust 核心模块
 # 在运行前，需要先在项目根目录执行 `maturin develop`
@@ -96,7 +104,58 @@ class Backtester:
             print("请先运行回测。")
             return
         # ... 此处添加绘图逻辑 ...
-        pass
+
+        #确保日期格式正确
+        df = self.portfolio_history.copy()
+        try:
+            df[self.date_col] = pd.to_datetime(df[self.date_col])
+        except KeyError:
+            print(f"错误：投资组合中缺少日期列 '{self.date_col}' ")    
+            return
+        
+        #计算策略净值
+        df['strategy_net_value'] = df['equity'] / self.initial_capital
+        # 绘制资金曲线
+        plt.figure(figsize=(12,8))
+        ax = plt.subplot(1,1,1)
+        ax.plot(df[self.date_col], df['strategy_net_value'], label='策略净值', color='#2ECC71',linewidth=2)
+        #美化图表
+        ax.set_xlabel('日期',fontsize=14,labelpad=10)
+        #设置x轴刻度、标签、输出格式
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+        plt.xticks(rotation=45, fontsize=12)
+
+        ax.grid(alpha=0.3)
+        ax.legend(loc='upper left', fontsize=10)
+
+        #计算相关指标
+        #年化收益率
+        total_return = df['strategy_net_value'].iloc[-1] - 1.0
+        days = (df[self.date_col].iloc[-1] - df[self.date_col].iloc[0]).days
+        annualized_return = (1 + total_return) ** (365.0 / days) - 1
+        #最大回测
+        df['cum_max'] = df['strategy_net_value'].cummax()
+        df['drawdown'] = df['strategy_net_value'] / df['cum_max'] - 1
+        max_drawdown = df['drawdown'].min()
+        #夏普比率
+        #==计算年化标准差==
+        daily_returns = df['strategy_net_value'].pct_change().dropna()
+        annualized_std = daily_returns.std() * np.sqrt(252)
+        #固定无风险收益率为0.015
+        risk_free_rate = 0.015
+        rf = (1 + risk_free_rate) ** (days / 365.0) - 1
+        excess_return_annualized = annualized_return - rf
+        sharpe_ratio = excess_return_annualized / annualized_std if annualized_std !=0 else np.nan
+        #在图表上显示指标
+        stats_text = f"年化收益率: {annualized_return:.2%}\n" + \
+        f"最大回撤: {max_drawdown:.2%}\n" + \
+        f"夏普比率: {sharpe_ratio:.2f}"
+
+        ax.text(0.01,0.90,stats_text, transform=ax.transAxes, fontsize=10,
+        verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        plt.tight_layout()
+        plt.show()
 
 
 class BaseStrategy:
