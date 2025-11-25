@@ -1,117 +1,194 @@
-# longgang_trader/alpha/dl_model_factor.py
+#!/usr/bin/env python3
+"""
+使用训练好的模型对 test集 进行推理。
+"""
+
+import sys
+from pathlib import Path
+from typing import Optional, Dict, Tuple, List, Union
 
 import torch
-import pandas as pd
+import torch.nn as nn
 import numpy as np
 from tqdm.auto import tqdm
+import json
+import os
+import argparse
+import yaml
 
-from .factor_calculator import BaseFactor
+# 使用新的 dataloader 和 model
+from .dataloader import get_test_dataloader
 from .gru_attention import AttentionGRURes
 
-class DLModelFactor(BaseFactor):
-    def __init__(self, model_path: str, input_dim: int = 158, seq_len: int = 60, 
-                 hidden_dim: int = 128, num_layers: int = 1, dropout: float = 0.1,
-                 batch_size: int = 2048):
-        """
-        初始化DL模型因子。
-        :param model_path: 预训练模型的路径。
-        :param input_dim: 模型输入的特征维度。
-        :param seq_len: 模型输入的序列长度。
-        :param hidden_dim: GRU隐藏层维度。
-        :param num_layers: GRU层数。
-        :param dropout: Dropout比例。
-        :param batch_size: 推理时的批处理大小。
-        """
-        super().__init__(name=f"DLFactor_seq{seq_len}")
-        self.model_path = model_path
-        self.input_dim = input_dim
-        self.seq_len = seq_len
-        self.hidden_dim = hidden_dim
-        self.num_layers = num_layers
-        self.dropout = dropout
-        self.batch_size = batch_size
-        
-        # 在初始化时就加载模型到内存，避免每次compute都加载
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"DLModelFactor 使用的设备: {self.device}")
-        
-        self.model = AttentionGRURes(
-            input_dim=self.input_dim,
-            hidden_dim=self.hidden_dim,
-            num_layers=self.num_layers,
-            dropout=self.dropout
-        ).to(self.device)
-        
-        try:
-            self.model.load_state_dict(torch.load(model_path, map_location=self.device))
-        except FileNotFoundError:
-            print(f"错误：模型文件未找到于 {model_path}")
-            print("请提供正确的 'model_path' 参数来实例化 DLModelFactor。")
-            raise
-            
-        self.model.eval()
+PathLike = Union[str, Path]
 
-    def compute(self, data: pd.DataFrame) -> pd.DataFrame:
-        """
-        计算DL模型的预测值作为因子。
-        :param data: 输入的DataFrame，应包含所有模型需要的原始特征，
-                     且索引为 MultiIndex(date, instrument)。
-        :return: 返回一个DataFrame，索引为 (date, instrument)，值为模型预测分。
-        """
-        print("开始计算深度学习因子...")
+# ================== yml 配置读取 ==================
+def load_config(yml_path: str | Path) -> dict:
+    yml_path = Path(yml_path)
+    with yml_path.open("r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    if cfg is None:
+        cfg = {}
+    return cfg
 
-        # 确保数据按 instrument 和 date 排序
-        data = data.sort_index(level=['instrument', 'date'])
-        
-        # 获取所有特征列
-        feature_cols = [col for col in data.columns if col not in ['date', 'instrument']]
-        if len(feature_cols) != self.model.gru.input_size:
-            raise ValueError(f"输入数据特征数 {len(feature_cols)} 与模型要求 {self.model.gru.input_size} 不符")
 
-        all_sequences = []
-        all_indices = []
+# ================== 主推理 ==================
+def inference_on_test_set(
+    model_path: str,
+    data_root: str,
+    batch_size: int = 256,
+    num_workers: int = 4,
+    universe: Optional[str] = None,
+    seq_len: int = 60,
+    hidden_dim: int = 128,
+    num_layers: int = 1,
+    dropout: float = 0.1,
+    device: Union[str, torch.device] = "cuda:0",
+    output_file: Optional[str] = None,
+):
+    # 设备
+    if torch.cuda.is_available() and str(device).startswith("cuda"):
+        device = torch.device(device)
+    else:
+        device = torch.device("cpu")
+    print(f"推理设备: {device}")
 
-        # 按股票代码分组，为每只股票创建时间序列
-        for instrument_code, group in tqdm(data.groupby(level='instrument'), desc="为每支股票创建序列"):
-            if len(group) < self.seq_len:
-                continue
+    # dataloader
+    test_loader = get_test_dataloader(
+        data_root,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        universe=universe,
+        seq_len=seq_len,
+    )
 
-            feature_array = group[feature_cols].values
+    if test_loader is None:
+        print("无法加载 test dataloader，退出程序。")
+        return None
 
-            # 使用 numpy 的 stride_tricks 高效创建滚动窗口
-            shape = (len(group) - self.seq_len + 1, self.seq_len, feature_array.shape[1])
-            strides = (feature_array.strides[0], feature_array.strides[0], feature_array.strides[1])
-            sequences = np.lib.stride_tricks.as_strided(feature_array, shape=shape, strides=strides)
-            
-            all_sequences.append(sequences)
+    n_features = test_loader.dataset.n_feat # pyright: ignore[reportAttributeAccessIssue]
+    print(f"特征数: {n_features}, 序列长度: {seq_len}")
 
-            # 记录每个序列对应的索引（即窗口的最后一个时间点）
-            indices = group.index[self.seq_len - 1:]
-            all_indices.extend(indices)
+    test_di = test_loader.dataset.di # pyright: ignore[reportAttributeAccessIssue]
+    ii_max = test_loader.dataset.ii # pyright: ignore[reportAttributeAccessIssue]
+    print(f"Test set 尺寸: di={test_di}, ii={ii_max}")
 
-        if not all_sequences:
-            print("警告：没有生成任何有效的时间序列。")
-            return pd.DataFrame()
+    # 全局预测矩阵：全 NaN
+    global_preds = np.full((test_di, ii_max), np.nan, dtype=np.float32)
 
-        sequences_np = np.vstack(all_sequences)
-        sequences_tensor = torch.tensor(sequences_np, dtype=torch.float32)
+    # 创建模型并加载权重
+    model = AttentionGRURes(
+        input_dim=n_features,
+        hidden_dim=hidden_dim,
+        num_layers=num_layers,
+        dropout=dropout,
+    ).to(device)
 
-        # --- 模型推理 ---
-        predictions = []
-        with torch.inference_mode():
-            for i in tqdm(range(0, len(sequences_tensor), self.batch_size), desc="模型推理中"):
-                batch = sequences_tensor[i:i+self.batch_size].to(self.device)
-                pred_batch = self.model(batch).cpu().numpy()
-                predictions.append(pred_batch)
+    print(f"加载模型: {model_path}")
+    state_dict = torch.load(model_path, map_location=device)
+    model.load_state_dict(state_dict)
+    model.eval()
+    print("模型加载完毕")
 
-        predictions_np = np.concatenate(predictions).flatten()
+    long_pred_list: List[np.ndarray] = []
+    long_tgt_list:  List[np.ndarray] = []
+    long_di_list:   List[np.ndarray] = []
+    long_ii_list:   List[np.ndarray] = []
 
-        # --- 格式化输出 ---
-        result_df = pd.DataFrame(
-            predictions_np,
-            index=pd.MultiIndex.from_tuples(all_indices, names=['date', 'instrument']),
-            columns=['factor_value']
-        )
+    # 推理
+    model.eval()
+    with torch.inference_mode():
+        for X_batch, y_batch, di_batch, ii_batch in tqdm(test_loader, desc=f"推理中[test]"):
+            X_batch = X_batch.to(device, non_blocking=True)
 
-        print(f"深度学习因子计算完成，生成 {len(result_df)} 个因子值。")
-        return result_df
+            y_pred = model(X_batch).view(-1).detach().cpu().numpy().astype(np.float32)
+            y_true = y_batch.numpy().reshape(-1).astype(np.float32)
+            di_np = di_batch.numpy().astype(np.int64)
+            ii_np = ii_batch.numpy().astype(np.int64)
+
+            global_preds[di_np, ii_np] = y_pred
+
+            long_pred_list.append(y_pred)
+            long_tgt_list.append(y_true)
+            long_di_list.append(di_np)
+            long_ii_list.append(ii_np)
+
+
+    # ========== 拼长表（内存里用，暂时不存盘）==========
+    preds_flat = np.concatenate(long_pred_list, axis=0)
+    tgts_flat  = np.concatenate(long_tgt_list, axis=0)
+    di_flat    = np.concatenate(long_di_list, axis=0)
+    ii_flat    = np.concatenate(long_ii_list, axis=0)
+
+    out_dict = {
+        "preds_flat": preds_flat,
+        "tgts_flat": tgts_flat,
+        "di_flat": di_flat,
+        "ii_flat": ii_flat,
+        "preds_2d": global_preds,
+    }
+
+    # 保存 2D 矩阵
+    if output_file is not None:
+        out_path = Path(output_file)
+        np.save(out_path, global_preds)
+        print(f"已保存2D预测矩阵到 {out_path}, shape={global_preds.shape}")
+
+    return out_dict
+
+
+# ================== 参数解析（只传 config.yml） ==================
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="使用 AttentionGRURes 对 test set 做日频推理"
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="推理配置 yml 路径"
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    cfg = load_config(args.config)
+
+    # 从 yml 中取参数，提供合理默认值
+    model_path   = cfg["model_path"]
+    data_root    = cfg["path_root"]
+    batch_size   = cfg.get("batch_size", 256)
+    num_workers  = cfg.get("num_workers", 4)
+    universe     = cfg.get("universe", None)
+    seq_len      = cfg.get("seq_len", 60)
+    hidden_dim   = cfg.get("hidden_dim", 128)
+    num_layers   = cfg.get("num_layers", 1)
+    dropout      = cfg.get("dropout", 0.1)
+    output_file  = cfg.get("output_file", None)
+
+    # device / gpu
+    if "device" in cfg:
+        device = cfg["device"]
+    elif "gpu" in cfg and torch.cuda.is_available():
+        device = f"cuda:{int(cfg['gpu'])}"
+    else:
+        device = "cpu"
+
+    inference_on_test_set(
+        model_path=model_path,
+        data_root=data_root,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        universe=universe,
+        seq_len=seq_len,
+        hidden_dim=hidden_dim,
+        num_layers=num_layers,
+        dropout=dropout,
+        device=device,
+        output_file=output_file,
+    )
+
+
+if __name__ == "__main__":
+    main()
