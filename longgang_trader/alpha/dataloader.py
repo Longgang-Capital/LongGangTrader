@@ -107,22 +107,18 @@ class FactorDataset_di_ii(Dataset):
     """
     PyTorch 数据集，用于基于sarray读取单因子特征和标签（日频数据，支持时间序列）。
     """
-    def __init__(self, path_root: Union[str,Path], factor_name: str, split: str, universe: Optional[str] = None, seq_len: int = 1):
-        print(f"正在读取{path_root}下的数据")
-        self.path_root = Path(path_root)
-        self.split = split
+    def __init__(self, feature_path: Union[str, Path], label_path: Union[str, Path], universe: Optional[str] = None, seq_len: int = 1):
+        print(f"正在读取特征: {feature_path}")
+        print(f"正在读取标签: {label_path}")
         self.seq_len = seq_len
-        
-        # 读取特征元数据
-        feat_meta_path = self.path_root / "features" / f"{split}_features.bin.json"
-        self.meta = load_json(feat_meta_path)
+
+        # 加载特征元数据
+        self.meta = load_json(str(Path(feature_path)) + '.json')
         
         # 加载特征数据 (di, ii, n_feat)
-        feat_path = self.path_root / "features" / f"{split}_features.bin"
-        self.X_3d = load_sarray_data(feat_path, copy_on_write=True)
+        self.X_3d = load_sarray_data(feature_path, copy_on_write=True)
         
         # 加载标签数据 (di, ii)
-        label_path = self.path_root / "labels" / f"{split}_labels.bin"
         self.y_2d = load_sarray_data(label_path, copy_on_write=True)
         
         # 获取维度信息
@@ -216,7 +212,8 @@ class FactorDataset_di_ii(Dataset):
         return x, y, di, self.orig_ii_arr[idx]
 
 
-def get_test_dataloader(path_root: Union[str, Path],
+def get_test_dataloader(feature_path: Union[str, Path],
+                        label_path: Union[str, Path],
                         batch_size: int = 64,
                         num_workers: int = 8,
                         universe: Optional[str] = None,
@@ -225,11 +222,12 @@ def get_test_dataloader(path_root: Union[str, Path],
     生成 test集的 DataLoader。
 
     参数：
-        path_root (str): 数据根路径
+        feature_path (str or Path): 特征文件 (.bin) 的直接路径.
+        label_path (str or Path): 标签文件 (.bin) 的直接路径.
         batch_size (int): 批次大小
         num_workers (int): 数据加载器工作进程数
-        universe (str): 股票池筛选，如 "univ_hs300/valid"（可选）
-        seq_len (int): 序列长度，每个样本包含过去seq_len天的数据
+        universe (str): 股票池筛选 (可选)
+        seq_len (int): 序列长度
 
     返回：
         test_loader
@@ -237,13 +235,16 @@ def get_test_dataloader(path_root: Union[str, Path],
     import torch
     torch.multiprocessing.set_sharing_strategy('file_system')
     
-    path_root = Path(path_root)
-    
-    # 只创建 test dataset
+    # 创建 test dataset
     try:
-        test_ds = FactorDataset_di_ii(path_root, 'features', 'test', universe, seq_len)
-    except FileNotFoundError:
-        print(f"警告: 在 {path_root} 中找不到 'test' split 的数据文件。返回 None。")
+        test_ds = FactorDataset_di_ii(
+            feature_path=feature_path,
+            label_path=label_path,
+            universe=universe, 
+            seq_len=seq_len
+        )
+    except FileNotFoundError as e:
+        print(f"警告: 找不到数据文件: {e}。返回 None。")
         return None
 
     test_loader = DataLoader(
