@@ -35,7 +35,8 @@ def load_config(yml_path: str | Path) -> dict:
 # ================== 主推理 ==================
 def inference_on_test_set(
     model_path: str,
-    data_root: str,
+    feature_path: str,
+    label_path: str,
     batch_size: int = 256,
     num_workers: int = 4,
     universe: Optional[str] = None,
@@ -46,16 +47,18 @@ def inference_on_test_set(
     device: Union[str, torch.device] = "cuda:0",
     output_file: Optional[str] = None,
 ):
-    # 设备
+    """Runs inference on the test set using a trained model."""
+    # Set device
     if torch.cuda.is_available() and str(device).startswith("cuda"):
         device = torch.device(device)
     else:
         device = torch.device("cpu")
-    print(f"推理设备: {device}")
+    print(f"Inference device: {device}")
 
-    # dataloader
+    # Dataloader
     test_loader = get_test_dataloader(
-        data_root,
+        feature_path=feature_path,
+        label_path=label_path,
         batch_size=batch_size,
         num_workers=num_workers,
         universe=universe,
@@ -63,20 +66,20 @@ def inference_on_test_set(
     )
 
     if test_loader is None:
-        print("无法加载 test dataloader，退出程序。")
+        print("Failed to create test dataloader. Exiting.")
         return None
 
     n_features = test_loader.dataset.n_feat # pyright: ignore[reportAttributeAccessIssue]
-    print(f"特征数: {n_features}, 序列长度: {seq_len}")
+    print(f"Number of features: {n_features}, Sequence length: {seq_len}")
 
     test_di = test_loader.dataset.di # pyright: ignore[reportAttributeAccessIssue]
     ii_max = test_loader.dataset.ii # pyright: ignore[reportAttributeAccessIssue]
-    print(f"Test set 尺寸: di={test_di}, ii={ii_max}")
+    print(f"Test set dimensions: di={test_di}, ii={ii_max}")
 
-    # 全局预测矩阵：全 NaN
+    # Initialize a matrix to store predictions
     global_preds = np.full((test_di, ii_max), np.nan, dtype=np.float32)
 
-    # 创建模型并加载权重
+    # Load model
     model = AttentionGRURes(
         input_dim=n_features,
         hidden_dim=hidden_dim,
@@ -84,57 +87,33 @@ def inference_on_test_set(
         dropout=dropout,
     ).to(device)
 
-    print(f"加载模型: {model_path}")
+    print(f"Loading model: {model_path}")
     state_dict = torch.load(model_path, map_location=device)
     model.load_state_dict(state_dict)
     model.eval()
-    print("模型加载完毕")
+    print("Model loaded successfully.")
 
-    long_pred_list: List[np.ndarray] = []
-    long_tgt_list:  List[np.ndarray] = []
-    long_di_list:   List[np.ndarray] = []
-    long_ii_list:   List[np.ndarray] = []
-
-    # 推理
+    # Inference loop
     model.eval()
     with torch.inference_mode():
-        for X_batch, y_batch, di_batch, ii_batch in tqdm(test_loader, desc=f"推理中[test]"):
+        for X_batch, y_batch, di_batch, ii_batch in tqdm(test_loader, desc="Inference on test set"):
             X_batch = X_batch.to(device, non_blocking=True)
 
             y_pred = model(X_batch).view(-1).detach().cpu().numpy().astype(np.float32)
-            y_true = y_batch.numpy().reshape(-1).astype(np.float32)
+            
             di_np = di_batch.numpy().astype(np.int64)
             ii_np = ii_batch.numpy().astype(np.int64)
 
+            # Place predictions in the correct (di, ii) locations
             global_preds[di_np, ii_np] = y_pred
 
-            long_pred_list.append(y_pred)
-            long_tgt_list.append(y_true)
-            long_di_list.append(di_np)
-            long_ii_list.append(ii_np)
-
-
-    # ========== 拼长表（内存里用，暂时不存盘）==========
-    preds_flat = np.concatenate(long_pred_list, axis=0)
-    tgts_flat  = np.concatenate(long_tgt_list, axis=0)
-    di_flat    = np.concatenate(long_di_list, axis=0)
-    ii_flat    = np.concatenate(long_ii_list, axis=0)
-
-    out_dict = {
-        "preds_flat": preds_flat,
-        "tgts_flat": tgts_flat,
-        "di_flat": di_flat,
-        "ii_flat": ii_flat,
-        "preds_2d": global_preds,
-    }
-
-    # 保存 2D 矩阵
+    # Save 2D prediction matrix
     if output_file is not None:
         out_path = Path(output_file)
         np.save(out_path, global_preds)
-        print(f"已保存2D预测矩阵到 {out_path}, shape={global_preds.shape}")
+        print(f"Saved 2D prediction matrix to {out_path}, shape={global_preds.shape}")
 
-    return out_dict
+    return {"preds_2d": global_preds}
 
 
 # ================== 参数解析（只传 config.yml） ==================
