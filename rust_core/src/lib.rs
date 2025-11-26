@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 use polars::prelude::*;
-use pyo3_polars::{PyDataFrame, PyLazyFrame};
+use pyo3_polars::{PyDataFrame};
 use std::collections::HashMap;
 
 // 声明并导入 utils 模块
@@ -46,20 +46,18 @@ impl BacktestConfig {
 /// :return: Polars DataFrame，包含每日的投资组合历史记录
 #[pyfunction]
 fn run_vectorized_backtest_rs(
-    signals_lf: PyLazyFrame,
-    market_data_lf: PyLazyFrame,
+    signals_lf: PyDataFrame,
+    market_data_lf: PyDataFrame,
     config: &BacktestConfig
 ) -> PyResult<PyDataFrame> {
 
     // --- 1. 数据准备和初始化 ---
-    let signals_lazy: LazyFrame = signals_lf.into();
-    let market_data_lazy: LazyFrame = market_data_lf.into();
+    //let signals_lazy: LazyFrame = signals_lf.into();
+    //let market_data_lazy: LazyFrame = market_data_lf.into();
 
     // 将LazyFrame转换为DataFrame进行处理（保持现有逻辑，后续可优化为纯LazyFrame操作）
-    let signals: DataFrame = signals_lazy.collect()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    let market_data: DataFrame = market_data_lazy.collect()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    let signals: DataFrame = signals_lf.into();
+    let market_data: DataFrame = market_data_lf.into();
 
     // 将DataFrame转换为更易于按日期查找的HashMap结构
     let market_data_map = preprocess_market_data(&market_data, config)
@@ -88,6 +86,8 @@ fn run_vectorized_backtest_rs(
         let holdings_value = calculate_holdings_value(&current_positions, market_data_for_date);
         let total_equity = cash + holdings_value;
 
+        let mut turnover_rate = 0.0;
+
         // b. 获取当日的目标持仓权重
         if let Some(target_weights) = get_target_weights_for_date(&signals_map, &date) {
         
@@ -96,6 +96,8 @@ fn run_vectorized_backtest_rs(
             
             // d. 生成交易指令
             let trades = calculate_trades(&current_positions, &target_values, market_data_for_date);
+
+            turnover_rate = calculate_turnover_rate(&trades, total_equity);
 
             // e. 执行交易并更新状态
             for trade in trades {
@@ -114,7 +116,7 @@ fn run_vectorized_backtest_rs(
              equity: total_equity,
              cash,
              holdings_value,
-             turnover_rate:0.0, // 这里可以计算或后续分析
+             turnover_rate,
         });
     }
 

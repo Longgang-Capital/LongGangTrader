@@ -11,12 +11,12 @@ fn get_date_column_as_string(df: &DataFrame, col_name: &str) -> PolarsResult<Str
     let date_series = df.column(col_name)?;
     match date_series.dtype() {
         DataType::Datetime(_, _) => date_series.datetime()?.to_string("%Y-%m-%d"),
-        DataType::Date => Ok(date_series.date()?.to_string("%Y-%m-%d")),
+        DataType::Date => date_series.date()?.to_string("%Y-%m-%d"),
         DataType::String => {
             // 尝试将字符串类型转换为日期类型，再格式化为字符串
             // Polars 的 cast 很强大，能自动解析多种日期格式
             let date_series = date_series.cast(&DataType::Date)?;
-            Ok(date_series.date()?.to_string("%Y-%m-%d"))
+            date_series.date()?.to_string("%Y-%m-%d")
         },
         other => Err(PolarsError::InvalidOperation(
             format!(
@@ -194,13 +194,33 @@ pub fn build_results_dataframe_from_history(
     let holdings_values: Vec<f64> = portfolio_history.iter().map(
         |s| s.holdings_value
     ).collect();
+    let turnover_rates: Vec<f64> = portfolio_history.iter().map(
+        |s| s.turnover_rate
+    ).collect();
 
     // 创建 Polars Series
-    let date_series = Series::new("date", dates);
-    let equity_series = Series::new("equity", equities);
-    let cash_series = Series::new("cash", cash);
-    let holdings_value_series = Series::new("holdings_value", holdings_values);
+    let date_series = Series::new("date".into(), dates);
+    let equity_series = Series::new("equity".into(), equities);
+    let cash_series = Series::new("cash".into(), cash);
+    let holdings_value_series = Series::new("holdings_value".into(), holdings_values);
+    let turnover_rate_series = Series::new("turnover_rate".into(), turnover_rates);
 
     // 组合成 DataFrame
-    DataFrame::new(vec![date_series, equity_series, cash_series, holdings_value_series])
+    DataFrame::new(vec![date_series.into(), equity_series.into(), cash_series.into(), holdings_value_series.into(), turnover_rate_series.into()])
+}
+
+/// 根据当天的交易列表和总资产计算换手率
+pub fn calculate_turnover_rate(
+    trades: &Vec<Trade>,
+    total_equity: f64,
+) -> f64 {
+    if total_equity == 0.0 {
+        return 0.0;
+    }
+
+    let total_traded_value: f64 = trades.iter()
+        .map(|trade| (trade.shares * trade.price).abs())
+        .sum();
+    
+    total_traded_value / total_equity
 }
