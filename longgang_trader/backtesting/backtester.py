@@ -65,8 +65,8 @@ class Backtester:
             weight_col=self.weight_col
         ) # pyright: ignore[reportOptionalCall]
         # 将 Pandas DataFrame 转换为 Polars LazyFrame
-        signals_pl = pl.from_pandas(signals).lazy()
-        data_pl = pl.from_pandas(self.data).lazy()
+        signals_pl = pl.from_pandas(signals)
+        data_pl = pl.from_pandas(self.data)
 
         # 2. 直接调用 Rust 函数，传递 Polars LazyFrame
         try:
