@@ -2,6 +2,13 @@
 
 use std::collections::HashMap;
 use polars::prelude::*;
+use std::path::Path;
+use serde::Deserialize;
+use std::io::Read;
+use pyo3::prelude::*;
+use std::fs::File;
+use serde_json;
+use serde_pickle;
 
 // 导入父模块的 BacktestConfig
 use super::BacktestConfig;
@@ -223,4 +230,80 @@ pub fn calculate_turnover_rate(
         .sum();
     
     total_traded_value / total_equity
+}
+
+#[derive(Deserialize, Debug)]
+pub struct BinFileMetadata {
+    dtype: String,
+    shape: Vec<usize>,
+}
+
+pub fn load_market_data(market_data_path: &str) -> PyResult<DataFrame> {
+    match Path::new(market_data_path).extension().and_then(|s| s.to_str()) {
+        Some("parquet") => {
+            let file = File::open(market_data_path).map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+            ParquetReader::new(file).finish().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+        },
+        Some("csv") => {
+            let file = File::open(market_data_path).map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+            CsvReader::new(file).finish().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+        },
+        Some("bin") => {
+            let json_path = Path::new(market_data_path).with_extension("bin.json");
+            let json_file = File::open(&json_path).map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("Failed to open companion JSON file: {}", e)))?;
+            let metadata: BinFileMetadata = serde_json::from_reader(json_file).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse JSON metadata: {}", e)))?;
+
+            if metadata.dtype != "<f4" {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Unsupported .bin dtype, only '<f4' (f32) supported.".to_string()));
+            }
+            if metadata.shape.len() != 2 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Unsupported .bin shape, only 2D arrays supported.".to_string()));
+            }
+
+            let mut file = File::open(market_data_path).map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+            let mut buffer: Vec<u8> = Vec::new();
+            file.read_to_end(&mut buffer).map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+            
+            let data: Vec<f32> = buffer.chunks_exact(4).map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap())).collect();
+            
+            let cols = metadata.shape[1];
+            let series: Vec<Series> = (0..cols).map(|i| {
+                let col_data: Vec<f32> = data.iter().skip(i).step_by(cols).cloned().collect();
+                Series::new(format!("col_{}", i).into(), col_data)
+            }).collect();
+
+            DataFrame::new(series.into_iter().map(|s| s.into()).collect())
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+        },
+        Some("pkl") => {
+            let file = File::open(market_data_path).map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+            let data: Vec<HashMap<String, serde_pickle::Value>> = serde_pickle::from_reader(file).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to deserialize .pkl file: {}", e)))?;
+            
+            if data.is_empty() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Pickle file is empty or in an unsupported format.".to_string()));
+            }
+
+            let columns: Vec<String> = data[0].keys().cloned().collect();
+            let mut series_vec: Vec<Series> = Vec::new();
+
+            for col in &columns {
+                let mut values: Vec<Option<f64>> = Vec::new();
+                for record in &data {
+                    if let Some(val) = record.get(col) {
+                        match val {
+                            serde_pickle::Value::F64(f) => values.push(Some(*f)),
+                            serde_pickle::Value::I64(i) => values.push(Some(*i as f64)),
+                            _ => values.push(None)
+                        }
+                    } else {
+                        values.push(None);
+                    }
+                }
+                series_vec.push(Series::new(col.into(), values));
+            }
+            DataFrame::new(series_vec.into_iter().map(|s| s.into()).collect())
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+        },
+        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Unsupported file extension: {:?}", market_data_path))),
+    }
 }

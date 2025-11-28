@@ -18,17 +18,20 @@ def setup_paths_and_imports():
     
     # Now we can import our custom modules
     from longgang_trader.alpha.dl_model_factor import inference_on_test_set
-    from longgang_trader.optimize.optimizer import LayeredOptimizer, EqualWeightOptimizer
-    from longgang_trader.backtesting.backtester import Backtester
-    from longgang_trader.backtesting.backtester import BaseStrategy as TopNFactorStrategy # Alias for compatibility
+    from longgang_trader.optimize.optimizer import LayeredOptimizer, EqualWeightOptimizer, MeanVarianceOptimizer, RiskParityOptimizer, TopNOptimizer
+    from longgang_trader.backtesting.backtester import Backtester, TopNFactorStrategy, GroupedFactorStrategy
 
     # Return imported modules to be used in main
     return {
         "inference_on_test_set": inference_on_test_set,
         "LayeredOptimizer": LayeredOptimizer,
         "EqualWeightOptimizer": EqualWeightOptimizer,
+        "MeanVarianceOptimizer": MeanVarianceOptimizer,
+        "RiskParityOptimizer": RiskParityOptimizer,
+        "TopNOptimizer": TopNOptimizer,
         "Backtester": Backtester,
-        "TopNFactorStrategy": TopNFactorStrategy
+        "TopNFactorStrategy": TopNFactorStrategy,
+        "GroupedFactorStrategy": GroupedFactorStrategy
     }
 
 def main():
@@ -42,13 +45,17 @@ def main():
     inference_on_test_set = modules["inference_on_test_set"]
     LayeredOptimizer = modules["LayeredOptimizer"]
     EqualWeightOptimizer = modules["EqualWeightOptimizer"]
+    MeanVarianceOptimizer = modules["MeanVarianceOptimizer"]
+    RiskParityOptimizer = modules["RiskParityOptimizer"]
+    TopNOptimizer = modules["TopNOptimizer"]
     Backtester = modules["Backtester"]
     TopNFactorStrategy = modules["TopNFactorStrategy"]
+    GroupedFactorStrategy = modules["GroupedFactorStrategy"]
 
     PROJECT_ROOT = Path(__file__).resolve().parent
     DATA_DIR = PROJECT_ROOT / 'data'
     RESULTS_DIR = DATA_DIR / 'results'
-    MARKET_DATA_PATH = PROJECT_ROOT / 'notebooks' / 'test_data.parquet'
+    MARKET_DATA_PATH = DATA_DIR / 'baostock_data_converted.parquet'
 
     # Create results directory
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -81,7 +88,7 @@ def main():
             "transaction_cost": 0.001,
             "top_n": 10,
             "date_col": "date",
-            "symbol_col": "order_book_id",
+            "symbol_col": "code", # Use 'code' as the symbol column
             "weight_col": "target_weight",
             "close_col": "close",
         }
@@ -128,75 +135,107 @@ def main():
 
     # --- Step 3. Portfolio Optimization ---
     print("\n--- Step 3: Running portfolio optimization ---")
-    n_dates_preds, n_instruments_preds = predictions.shape
-    
+    symbol_col_name = CONFIG['backtest_config']['symbol_col']
+    date_col_name = CONFIG['backtest_config']['date_col']
+
     # Use real date range and instrument count from metadata
-    dates_preds = pd.date_range(start=START_DATE, periods=n_dates_preds, freq='B')
-    instruments_preds = [f"INS_{i:04d}" for i in range(n_instruments_preds)]
+    with open("./data/test_ticker_list.json","r") as f:
+        instruments_preds = json.load(f)
+    with open("./data/test_tradedate_list.json","r") as f:
+        dates_preds = json.load(f)
+    # 正确转换日期格式：YYYYMMDD -> datetime
+    dates_preds = pd.to_datetime(dates_preds, format='%Y%m%d')
 
     df_preds = pd.DataFrame(predictions, index=dates_preds, columns=instruments_preds)
     factor_data_pd = df_preds.stack().reset_index()
-    factor_data_pd.columns = ['date', 'order_book_id', 'factor_value']
+    factor_data_pd.columns = [date_col_name, symbol_col_name, 'factor_value']
     factor_data_pd.dropna(inplace=True)
     factor_data_pl = pl.from_pandas(factor_data_pd)
-    
-    # Load market data from parquet file
+    del df_preds, factor_data_pd
+
     print(f"Loading market data from {MARKET_DATA_PATH}")
+
+    # Read the pre-converted market data
     stock_data_pl = pl.read_parquet(MARKET_DATA_PATH)
-    
-    # Ensure market data has 'date', 'order_book_id', 'close'
-    required_market_cols = ['date', 'order_book_id', 'close']
+
+    required_market_cols = [date_col_name, symbol_col_name, 'close']
     if not all(col in stock_data_pl.columns for col in required_market_cols):
         raise ValueError(f"Market data from {MARKET_DATA_PATH} missing required columns: {required_market_cols}")
 
+    # Use TopNOptimizer for concentrated weights
+    top_n_config = CONFIG["optimizer_config"].copy()
+    top_n_config.update({
+        "top_n": 50  # Select top 50 stocks in each group
+    })
+
     layered_optimizer = LayeredOptimizer(
-        optimizer=EqualWeightOptimizer(),
+        optimizer=TopNOptimizer(top_n_config),
         config=CONFIG["optimizer_config"]
     )
     
     optimized_weights_pl = layered_optimizer.optimize_layered_portfolio(
-        stock_data=stock_data_pl, # Pass real market data
+        stock_data=stock_data_pl,
         factor_data=factor_data_pl,
+        date_col=date_col_name,
+        symbol_col=symbol_col_name,
         weight_col=CONFIG['backtest_config']['weight_col']
     )
-    
-    # Save optimized weights
+
+    # Convert symbol format from standard (688069.SH) to baostock (sh.688069)
+    def convert_symbol_format(symbol):
+        '''Convert from standard format (688069.SH) to baostock format (sh.688069)'''
+        if '.' in symbol:
+            code, exchange = symbol.split('.')
+            if exchange == 'SH':
+                return f'sh.{code}'
+            elif exchange == 'SZ':
+                return f'sz.{code}'
+        return symbol
+
+    optimized_weights_pl = optimized_weights_pl.with_columns([
+        pl.col(symbol_col_name).map_elements(convert_symbol_format, return_dtype=pl.Utf8).alias(symbol_col_name)
+    ])
+
     weights_output_path = RESULTS_DIR / 'optimized_weights.parquet'
     optimized_weights_pl.write_parquet(weights_output_path)
     print(f"Optimization complete. Weights saved to {weights_output_path}")
 
     # --- 4. Backtesting ---
-    print("\n--- Step 4: Running backtest ---")
-
-    class PrecomputedWeightStrategy(TopNFactorStrategy):
-        def generate_signals_for_all_dates(self):
-            return self.factor_data[['date', 'order_book_id', 'target_weight']]
-
-    strategy = PrecomputedWeightStrategy(
-        factor_data=optimized_weights_pl.to_pandas(), 
-        config=CONFIG['backtest_config']
-    )
+    print("\n--- Step 4: Running grouped backtest ---")
     
-    # Join the weights with market data to ensure backtest runs only on valid data
-    backtest_market_data_pd = stock_data_pl.to_pandas()
+    backtest_config = CONFIG['backtest_config'].copy()
+    # Let the strategy know which column the optimizer used for weights
+    backtest_config['optimized_weight_col'] = CONFIG['backtest_config']['weight_col']
+
+    strategy = GroupedFactorStrategy(
+        factor_data=optimized_weights_pl.to_pandas(), 
+        config=backtest_config
+    )
     
     backtester = Backtester(
         strategy=strategy,
-        data=backtest_market_data_pd,
-        config=CONFIG['backtest_config']
+        data_path=str(MARKET_DATA_PATH),  # Use the converted data file
+        config=backtest_config
     )
     
-    backtester.run_backtest()
-    print("Backtest finished.")
-    
-    # Save results
-    portfolio_history = backtester.get_portfolio_history()
-    if portfolio_history is not None and not portfolio_history.empty:
-        history_output_path = RESULTS_DIR / 'portfolio_history.csv'
-        portfolio_history.to_csv(history_output_path, index=False)
-        print(f"Portfolio history saved to {history_output_path}")
+    group_results = backtester.run_grouped_backtest(save_plots=True, results_dir=str(RESULTS_DIR))
+
+    if group_results:
+        for group, results in group_results.items():
+            portfolio_history = results['portfolio_history']
+            metrics = results['metrics']
+            
+            print(f"\n----- Group {group} Metrics -----")
+            for metric, value in metrics.items():
+                print(f"{metric}: {value:.4f}")
+
+            if portfolio_history is not None and not portfolio_history.empty:
+                history_output_path = RESULTS_DIR / f'portfolio_history_group_{group}.csv'
+                portfolio_history.to_csv(history_output_path, index=False)
+                print(f"Portfolio history for group {group} saved to {history_output_path}")
+        print("\nGrouped backtest finished successfully!")
     else:
-        print("Backtest did not produce any history.")
+        print("Grouped backtest did not produce any results.")
 
     print("\nWorkflow finished successfully!")
 

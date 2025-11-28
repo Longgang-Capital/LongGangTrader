@@ -417,6 +417,57 @@ class RiskParityOptimizer(BasePortfolioOptimizer):
         )
 
 
+class TopNOptimizer(BasePortfolioOptimizer):
+    """
+    TopN优化器
+    在每个分组中选择因子值最高的N只股票进行等权重分配
+    """
+
+    def optimize_portfolio(
+        self,
+        stock_data: pl.DataFrame,
+        factor_data: pl.DataFrame,
+        group_col: str = "group",
+        date_col: str = "date",
+        symbol_col: str = "order_book_id",
+        factor_value_col: str = "factor_value",
+        weight_col: str = "optimized_weight"
+    ) -> pl.DataFrame:
+        """
+        执行TopN优化
+
+        :param stock_data: 市场数据
+        :param factor_data: 因子数据
+        :param group_col: 分组列名
+        :param date_col: 日期列名
+        :param symbol_col: 股票代码列名
+        :param factor_value_col: 因子值列名
+        :param weight_col: 权重列名
+        :return: 包含优化权重的DataFrame
+        """
+        top_n = self.config.get("top_n", 50)
+
+        # 在每个分组中选择前N只股票
+        top_n_data = factor_data.lazy().sort([date_col, group_col, factor_value_col], descending=[False, False, True])\
+            .group_by([date_col, group_col])\
+            .head(top_n)\
+            .collect()
+
+        # 计算等权重
+        optimized_weights = top_n_data.lazy().with_columns([
+            (1.0 / pl.col(symbol_col).count().over([date_col, group_col])).alias(weight_col)
+        ]).collect()
+
+        self.optimization_info = {
+            "optimizer_type": "TopN",
+            "top_n": top_n,
+            "total_dates": optimized_weights[date_col].n_unique(),
+            "average_stocks_per_date": len(optimized_weights) / optimized_weights[date_col].n_unique()
+        }
+
+        return optimized_weights
+
+
 class LayeredOptimizer:
     """
     分层优化器
