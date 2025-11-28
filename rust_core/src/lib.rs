@@ -6,6 +6,7 @@ use std::collections::HashMap;
 // 声明并导入 utils 模块
 mod utils;
 use utils::*;
+
 /// 从 Python 传入的回测配置参数
 /// 使用 #[pyclass] 宏使其可以在 Python 中实例化
 #[pyclass]
@@ -41,23 +42,20 @@ impl BacktestConfig {
 /// Rust 实现的高性能向量化回测函数
 ///
 /// :param signals_lf: Polars LazyFrame，包含['date', 'symbol', 'target_weight']等列
-/// :param market_data_lf: Polars LazyFrame，包含['date', 'symbol', 'close']等列
+/// :param market_data_path: 市场数据的文件路径 (parquet, csv, bin, pkl)
 /// :param config: BacktestConfig 对象，包含回测参数
 /// :return: Polars DataFrame，包含每日的投资组合历史记录
 #[pyfunction]
 fn run_vectorized_backtest_rs(
     signals_lf: PyDataFrame,
-    market_data_lf: PyDataFrame,
+    market_data_path: String,
     config: &BacktestConfig
 ) -> PyResult<PyDataFrame> {
 
     // --- 1. 数据准备和初始化 ---
-    //let signals_lazy: LazyFrame = signals_lf.into();
-    //let market_data_lazy: LazyFrame = market_data_lf.into();
+    let market_data: DataFrame = load_market_data(&market_data_path)?;
 
-    // 将LazyFrame转换为DataFrame进行处理（保持现有逻辑，后续可优化为纯LazyFrame操作）
     let signals: DataFrame = signals_lf.into();
-    let market_data: DataFrame = market_data_lf.into();
 
     // 将DataFrame转换为更易于按日期查找的HashMap结构
     let market_data_map = preprocess_market_data(&market_data, config)

@@ -12,6 +12,7 @@ venv/
 *.egg-info/
 dist/
 build/
+data/results/
 *.dvcignore
 .dvc/config
 .dvc/
