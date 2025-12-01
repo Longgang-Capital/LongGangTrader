@@ -29,14 +29,26 @@ pub struct BacktestConfig {
 
     #[pyo3(get, set)]
     pub weight_col: String,
+
+    #[pyo3(get, set)]
+    pub rebalance_days: i32, // 调仓天数，1表示每日调仓，N表示每N天调仓
 }
 
 #[pymethods]
 impl BacktestConfig {
     #[new] // 这个构造函数允许在 Python 中通过 `BacktestConfig()` 创建实例
-    fn new(initial_capital: f64, transaction_cost_pct: f64, 
-        symbol_col: String, date_col: String, close_col: String, weight_col: String) -> Self {
-        BacktestConfig { initial_capital, transaction_cost_pct, symbol_col, date_col, close_col, weight_col }
+    fn new(initial_capital: f64, transaction_cost_pct: f64,
+        symbol_col: String, date_col: String, close_col: String, weight_col: String,
+        rebalance_days: i32) -> Self {
+        BacktestConfig {
+            initial_capital,
+            transaction_cost_pct,
+            symbol_col,
+            date_col,
+            close_col,
+            weight_col,
+            rebalance_days
+        }
     }
 }
 /// Rust 实现的高性能向量化回测函数
@@ -72,6 +84,9 @@ fn run_vectorized_backtest_rs(
     let mut current_positions: PositionMap = HashMap::new(); // symbol -> shares
     let mut portfolio_history: Vec<PortfolioSnapshot> = Vec::new(); // 用于记录每日快照
 
+    // 初始化交易日计数器
+    let mut day_counter = 0;
+
     // --- 3. 按时间顺序遍历交易日 (Main Loop) ---
     for date in sorted_unique_dates {
         // 获取当日的市场价格数据，如果某天没有数据则跳过
@@ -86,29 +101,34 @@ fn run_vectorized_backtest_rs(
 
         let mut turnover_rate = 0.0;
 
-        // b. 获取当日的目标持仓权重
-        if let Some(target_weights) = get_target_weights_for_date(&signals_map, &date) {
-        
-            // c. 计算目标持仓市值
-            let target_values = calculate_target_positions_value(total_equity, target_weights);
-            
-            // d. 生成交易指令
-            let trades = calculate_trades(&current_positions, &target_values, market_data_for_date);
+        // b. 检查是否需要调仓（每N天调一次）
+        let should_rebalance = day_counter % config.rebalance_days == 0;
 
-            turnover_rate = calculate_turnover_rate(&trades, total_equity);
+        // c. 获取当日的目标持仓权重（如果有信号且需要调仓）
+        if should_rebalance {
+            if let Some(target_weights) = get_target_weights_for_date(&signals_map, &date) {
 
-            // e. 执行交易并更新状态
-            for trade in trades {
-                let trade_value = trade.shares * trade.price;
-                let transaction_cost = trade_value.abs() * config.transaction_cost_pct;
+                // d. 计算目标持仓市值
+                let target_values = calculate_target_positions_value(total_equity, target_weights);
 
-                // 更新现金和持仓
-                cash -= trade_value + transaction_cost;
-                *current_positions.entry(trade.symbol).or_insert(0.0) += trade.shares;
+                // e. 生成交易指令
+                let trades = calculate_trades(&current_positions, &target_values, market_data_for_date);
+
+                turnover_rate = calculate_turnover_rate(&trades, total_equity);
+
+                // f. 执行交易并更新状态
+                for trade in trades {
+                    let trade_value = trade.shares * trade.price;
+                    let transaction_cost = trade_value.abs() * config.transaction_cost_pct;
+
+                    // 更新现金和持仓
+                    cash -= trade_value + transaction_cost;
+                    *current_positions.entry(trade.symbol).or_insert(0.0) += trade.shares;
+                }
             }
-        }    
+        }
 
-        // f. 记录当日的投资组合快照
+        // g. 记录当日的投资组合快照
         portfolio_history.push(PortfolioSnapshot {
              date: date.clone(),
              equity: total_equity,
@@ -116,6 +136,9 @@ fn run_vectorized_backtest_rs(
              holdings_value,
              turnover_rate,
         });
+
+        // h. 更新交易日计数器
+        day_counter += 1;
     }
 
     // --- 4. 构建并返回结果 DataFrame ---
