@@ -109,6 +109,47 @@ class BasePortfolioOptimizer(ABC):
 
         return normalized_data
 
+    def _filter_top_percentage_factor(
+        self,
+        factor_data: pl.DataFrame,
+        date_col: str = "date",
+        symbol_col: str = "order_book_id",
+        factor_value_col: str = "factor_value",
+        top_percentage: float = 0.2
+    ) -> pl.DataFrame:
+        """
+        筛选每个时间内因子值前n%的股票，其他股票的因子值设为0
+
+        :param factor_data: 因子数据
+        :param date_col: 日期列名
+        :param symbol_col: 股票代码列名
+        :param factor_value_col: 因子值列名
+        :param top_percentage: 前n%的比例，默认20%
+        :return: 筛选后的因子数据
+        """
+        if top_percentage >= 1.0:
+            # 如果top_percentage为1.0或更大，返回原始数据
+            return factor_data
+
+        result_data = factor_data.clone()
+
+        # 使用polars的窗口函数计算每个日期的分位数
+        result_data = result_data.lazy().with_columns([
+            # 计算每个日期的分位数阈值
+            pl.col(factor_value_col)
+            .quantile(1 - top_percentage)
+            .over(date_col)
+            .alias("threshold")
+        ]).with_columns([
+            # 将低于阈值的因子值设为0
+            pl.when(pl.col(factor_value_col) >= pl.col("threshold"))
+            .then(pl.col(factor_value_col))
+            .otherwise(0.0)
+            .alias(factor_value_col)
+        ]).drop("threshold").collect()
+
+        return result_data
+
 
 class EqualWeightOptimizer(BasePortfolioOptimizer):
     """
@@ -485,6 +526,7 @@ class LayeredOptimizer:
         self.config = config or {}
         self.n_groups = config.get("n_groups", 5)  # 分层数量
         self.group_col = config.get("group_col", "group")
+        self.top_percentage = config.get("top_percentage", 1.0)  # 前n%因子值筛选，默认不筛选
 
     def create_factor_groups(
         self,
@@ -495,6 +537,7 @@ class LayeredOptimizer:
     ) -> pl.DataFrame:
         """
         创建因子分组 - 使用polars向量化方法
+        仅对因子值不为0的股票进行分组
 
         :param factor_data: 因子数据
         :param date_col: 日期列名
@@ -504,18 +547,22 @@ class LayeredOptimizer:
         """
         result_data = factor_data.clone()
 
-        # 使用rank排序进行无重复分组
+        # 筛选因子值不为0的股票进行分组
         result_data = result_data.lazy().with_columns([
-            # 按因子值降序排列（因子值越大越好）
-            pl.col(factor_value_col)
-            .rank(method="dense", descending=True)
-            .over(date_col)
+            # 按因子值降序排列（因子值越大越好），仅对非零因子值股票进行分组
+            pl.when(pl.col(factor_value_col) > 0)
+            .then(pl.col(factor_value_col).rank(method="dense", descending=True))
+            .otherwise(None)
             .alias("rank")
         ]).with_columns([
-            # 根据排名分配分组
-            ((pl.col("rank") - 1) * self.n_groups / pl.col("rank").max().over(date_col))
-            .floor()
-            .cast(pl.Int64)
+            # 根据排名分配分组，因子值为0的股票不分配分组
+            pl.when(pl.col("rank").is_not_null())
+            .then(
+                ((pl.col("rank") - 1) * self.n_groups / pl.col("rank").max().over(date_col))
+                .floor()
+                .cast(pl.Int64)
+            )
+            .otherwise(None)
             .alias(self.group_col)
         ]).drop("rank").collect()
 
@@ -541,12 +588,17 @@ class LayeredOptimizer:
         :param weight_col: 权重列名
         :return: 包含优化权重的DataFrame
         """
-        # 1. 创建因子分组
-        grouped_factor_data = self.create_factor_groups(
-            factor_data, date_col, symbol_col, factor_value_col
+        # 1. 筛选前n%的因子值
+        filtered_factor_data = self.optimizer._filter_top_percentage_factor(
+            factor_data, date_col, symbol_col, factor_value_col, self.top_percentage
         )
 
-        # 2. 在每组内执行组合优化
+        # 2. 创建因子分组（仅对非零因子值股票进行分组）
+        grouped_factor_data = self.create_factor_groups(
+            filtered_factor_data, date_col, symbol_col, factor_value_col
+        )
+
+        # 3. 在每组内执行组合优化
         optimized_data = self.optimizer.optimize_portfolio(
             stock_data,
             grouped_factor_data,

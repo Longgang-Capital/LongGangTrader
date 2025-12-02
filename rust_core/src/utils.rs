@@ -57,7 +57,12 @@ pub struct PortfolioSnapshot {
 // --- 公共类型别名 ---
 
 /// pub 关键字使其对 lib.rs 可见
-pub type DailyMarketData = HashMap<String, f64>;
+pub struct MarketDataEntry {
+    pub price: f64,
+    pub volume: i64,
+    pub preclose: f64,
+}
+pub type DailyMarketData = HashMap<String, MarketDataEntry>;
 pub type DailySignalData = HashMap<String, f64>;
 pub type PositionMap = HashMap<String, f64>;
 
@@ -70,15 +75,19 @@ pub fn preprocess_market_data(df: &DataFrame, config: &BacktestConfig) -> Polars
     let date_col = get_date_column_as_string(df, &config.date_col)?;
     let symbol_col = df.column(&config.symbol_col)?.str()?;
     let close_col = df.column(&config.close_col)?.f64()?;
+    let volume_col = df.column(&config.volume_col)?.i64()?;
+    let preclose_col = df.column(&config.preclose_col)?.f64()?;
 
     for i in 0..df.height() {
         let date = date_col.get(i).unwrap().to_string();
         let symbol = symbol_col.get(i).unwrap().to_string();
         let close = close_col.get(i).unwrap();
+        let volume = volume_col.get(i).unwrap_or(0);
+        let preclose = preclose_col.get(i).unwrap_or(0.0);
         
         map.entry(date)
            .or_insert_with(HashMap::new)
-           .insert(symbol, close);
+           .insert(symbol, MarketDataEntry { price: close, volume, preclose });
     }
     Ok(map)
 }
@@ -119,14 +128,23 @@ pub fn get_sorted_unique_dates(df: &DataFrame, config: &BacktestConfig) -> Polar
 pub fn calculate_holdings_value(
     current_positions: &PositionMap,
     market_data_for_date: &DailyMarketData,
+    last_known_prices: &HashMap<String, f64>
 ) -> f64 {
-    // 示例实现
     current_positions.iter()
         .map(|(symbol, &shares)| {
-            let price = market_data_for_date.get(symbol).unwrap_or(&0.0);
+            // 优先获取当日价格
+            let price = if let Some(entry) = market_data_for_date.get(symbol) {
+                    entry.price
+                } else {
+                    // 当日无数据，尝试获取"最后已知价格" (相当于停牌时的昨收)
+                    *last_known_prices.get(symbol).expect("Missing market data for held symbol!")
+                };
+            
+            // 如果连历史价格都没有，那就真的只能算0了(或者报错)
             shares * price
         })
         .sum()
+    
 }
 
 /// 从预处理好的信号数据中，获取指定日期的目标持仓权重
@@ -150,10 +168,12 @@ pub fn calculate_target_positions_value(
 }
 
 /// 比较当前持仓和目标持仓，生成具体的交易指令列表
+/// 支持涨跌停限制：涨停禁止买入，跌停禁止卖出
 pub fn calculate_trades(
     current_positions: &PositionMap,
     target_positions_value: &HashMap<String, f64>,
     market_data_for_date: &DailyMarketData,
+    limit_pct: f64,
 ) -> Vec<Trade> {
     let mut trades = Vec::new();
     let mut all_symbols: Vec<_> = current_positions.keys().collect();
@@ -162,23 +182,48 @@ pub fn calculate_trades(
     all_symbols.dedup();
 
     for symbol in all_symbols {
+        let entry = match market_data_for_date.get(symbol) {
+            Some(entry) => entry,
+            None => continue,
+        };
+        // 跳过无效价格或无成交量的股票
+        if entry.price <= 0.0 || entry.volume < 1 {
+            continue;
+        }
+
         let current_shares = *current_positions.get(symbol).unwrap_or(&0.0);
         let target_value = *target_positions_value.get(symbol).unwrap_or(&0.0);
-        let price = *market_data_for_date.get(symbol).unwrap_or(&0.0);
+        let price = entry.price;
+        let preclose = entry.preclose;
 
-        if price > 0.0 {
-            let target_shares = target_value / price;
-            let shares_to_trade = target_shares - current_shares;
+        let target_shares = target_value / price;
+        let shares_to_trade = target_shares - current_shares;
 
-            // 只有在交易股数变化显著时才生成交易
-            if shares_to_trade.abs() > 1e-6 {
-                trades.push(Trade {
-                    symbol: symbol.clone(),
-                    shares: shares_to_trade,
-                    price,
-                });
+        // 只有在交易股数变化显著时才生成交易
+        if shares_to_trade.abs() <= 1e-6 {
+            continue;
+        }
+
+        // 涨跌停判断（需要有效的前收盘价）
+        if preclose > 0.0 && limit_pct > 0.0 {
+            let limit_up_price = preclose * (1.0 + limit_pct);
+            let limit_down_price = preclose * (1.0 - limit_pct);
+
+            // 涨停：禁止买入（shares_to_trade > 0）
+            if price >= limit_up_price * 0.9999 && shares_to_trade > 0.0 {
+                continue;
+            }
+            // 跌停：禁止卖出（shares_to_trade < 0）
+            if price <= limit_down_price * 1.0001 && shares_to_trade < 0.0 {
+                continue;
             }
         }
+
+        trades.push(Trade {
+            symbol: symbol.clone(),
+            shares: shares_to_trade,
+            price,
+        });
     }
     trades
 }
