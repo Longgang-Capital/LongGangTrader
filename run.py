@@ -165,11 +165,12 @@ def main():
     # Use TopNOptimizer for concentrated weights
     top_n_config = CONFIG["optimizer_config"].copy()
     top_n_config.update({
-        "top_n": 50  # Select top 50 stocks in each group
+        "top_n": 50,  # Select top 50 stocks in each group
+        "top_percentage": 0.2  # Select top 20% stocks based on factor value
     })
 
     layered_optimizer = LayeredOptimizer(
-        optimizer=TopNOptimizer(top_n_config),
+        optimizer=RiskParityOptimizer(top_n_config),
         config=CONFIG["optimizer_config"]
     )
     
@@ -239,8 +240,7 @@ def main():
 
     print("\nWorkflow finished successfully!")
 
-if __name__ == "__main__":
-    main()
+
 
 if __name__ == "__main__":
     main()

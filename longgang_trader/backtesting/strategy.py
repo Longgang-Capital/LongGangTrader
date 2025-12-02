@@ -20,14 +20,9 @@ class BaseStrategy:
         if config is None:
             config = {}
 
-        if isinstance(factor_data, pd.DataFrame):
-            factor_data = pl.from_pandas(factor_data)
-        elif isinstance(factor_data, pl.LazyFrame):
-            factor_data = factor_data.collect()
-        elif not isinstance(factor_data, pl.DataFrame):
-            raise TypeError("factor_data must be a pandas or polars DataFrame")
+        
 
-        self.factor_data = factor_data.clone()
+        
         self.config = config
         self.date_col = config.get("date_col", "date")
         self.symbol_col = config.get("symbol_col", "order_book_id")
@@ -41,6 +36,40 @@ class BaseStrategy:
             factor_key = weight_key
         self.factor_value_col = factor_key or "factor_value"
         self.weight_col = weight_key or "target_weight"
+
+        self.factor_data = self.__to_polars_df__(factor_data)
+        #self.__shift_factor_data__()
+
+    def __to_polars_df__(self, df: Union[pd.DataFrame, pl.DataFrame, pl.LazyFrame]) -> pl.DataFrame:
+        # 1. 确保 factor_data 是 Polars DataFrame
+        if isinstance(df, pd.DataFrame):
+            return pl.from_pandas(df)
+        elif isinstance(df, pl.LazyFrame):
+            return df.collect()
+        elif isinstance(df, pl.DataFrame):
+            return df
+        else:
+            raise TypeError("Input must be a pandas or polars DataFrame")
+
+    def __shift_factor_data__(self)->None:
+
+        # 2. 获取所有交易日历
+        unique_dates = self.factor_data.select(pl.col(self.date_col).unique()).sort(self.date_col)[self.date_col].to_list()
+        # 3. 建立 T -> T+1 的映射
+        date_map = {unique_dates[i]: unique_dates[i+1] for i in range(len(unique_dates)-1)}
+        # 4. 执行“物理”位移：将 Date T 的权重，修改为 Date T+1 生效
+        # 这样 Rust 读到 Date T+1 时，拿到的就是原本 Date T 生成的权重
+        self.factor_data = (
+            self.factor_data
+            .with_columns(
+                pl.col(self.date_col).replace(date_map, default=None).alias("next_trade_date")
+            )
+            .drop_nulls("next_trade_date") # 丢弃最后一天无法交易的信号
+            .drop(self.date_col) # 丢弃旧日期
+            .rename({"next_trade_date": self.date_col}) # 重命名新日期为 date
+        )
+        # 注意：这里不需要再 fill_null(0.0) 了，因为 Rust 引擎对于读不到权重的股票会自动处理为卖出(0)。
+
 
     def generate_signals(self, current_date, current_positions):
         """
@@ -64,7 +93,7 @@ class SimpleLayeredStrategy(BaseStrategy):
     """一个简单的策略，在每个交易日，等权重买入因子值最高的一只股票"""
     def generate_signals_for_all_dates(self):
         # 合并因子数据，方便处理
-        data = self.factor_data.clone()
+        data = self.factor_data
 
         # 在每个日期，找到因子值最高的股票
         signals = (
@@ -211,7 +240,7 @@ class SimpleWeightStrategy(BaseStrategy):
         print(f"总信号数: {total_signals}")
         print(f"权重列: {self.weight_col}")
         print("信号数据预览:")
-        print(signals.head())
+        print(signals.filter(pl.col(self.weight_col)>0).head())
 
         return signals
 

@@ -39,10 +39,13 @@ class Backtester:
         self.config = config
         self.initial_capital = config.get("initial_capital", 1_000_000)
         self.transaction_cost = config.get("transaction_cost", 0.001)  # 0.1%
-        self.symbol_col = config.get("symbol_col", "symbol")
-        self.date_col = config.get("date_col", "date")
+        self.symbol_col = strategy.symbol_col
+        self.date_col = strategy.date_col
         self.close_col = config.get("close_col", "close")
-        self.weight_col = config.get("weight_col", "target_weight")
+        self.weight_col = strategy.weight_col
+        self.volume_col = config.get("volume_col", "volume")
+        self.preclose_col = config.get("preclose_col", "preclose")
+        self.limit_pct = config.get("limit_pct", 0.1)
         self.rebalance_days = config.get("rebalance_days", 1)  # 调仓天数，默认为1（每日调仓）
 
         self.portfolio_history = None
@@ -65,6 +68,9 @@ class Backtester:
             date_col=self.date_col,
             close_col=self.close_col,
             weight_col=self.weight_col,
+            volume_col=self.volume_col,
+            preclose_col=self.preclose_col,
+            limit_pct=self.limit_pct,
             rebalance_days=self.rebalance_days
         )
         if isinstance(signals, pd.DataFrame):
@@ -143,12 +149,9 @@ class Backtester:
         # 夏普比率
         daily_returns = df['strategy_net_value'].pct_change().dropna()
         annualized_std = daily_returns.std() * np.sqrt(252)
-        risk_free_rate = 0.015
-        if days == 0:
-            rf = 0.0
-        else:
-            rf = (1 + risk_free_rate) ** (days / 365.0) - 1
-        excess_return_annualized = annualized_return - rf
+        risk_free_rate = 0.01
+
+        excess_return_annualized = annualized_return - risk_free_rate
         sharpe_ratio = excess_return_annualized / annualized_std if annualized_std != 0 else np.nan
         
         return {
@@ -274,3 +277,55 @@ class Backtester:
 
         return all_results
 
+def ensure_market_data_continuity(df: pl.DataFrame) -> pl.DataFrame:
+    """
+    修复行情数据：确保所有股票在所有交易日都有数据。
+    缺失的行将用上一日的收盘价填充，Volume设为0。
+    """
+    print("正在进行行情数据完整性检查与填充...")
+    
+    # 1. 获取全量的日期和代码
+    # 注意：这里假设 df 至少包含所有交易日。如果不全，需要外部传入 calendar list。
+    unique_dates = df.select(pl.col("date").unique()).sort("date")
+    unique_codes = df.select(pl.col("code").unique())
+    
+    # 2. 生成笛卡尔积（所有日期 x 所有代码）
+    # cross join 会生成巨大的表，但这是保证连续性的唯一方法
+    full_skeleton = unique_dates.join(unique_codes, how="cross")
+    
+    # 3. 将原始数据 Left Join 回骨架
+    # 使用 join_asof 也可以，但在多代码场景下 left join + forward_fill 更直观
+    merged = full_skeleton.join(df, on=["date", "code"], how="left")
+    
+    # 4. 执行前向填充 (Forward Fill)
+    # 必须先按 code, date 排序
+    df_filled = (
+        merged
+        .sort(["code", "date"])
+        .with_columns([
+            # 价格类字段：用前值填充 (模拟停牌时的价格)
+            pl.col("close").forward_fill(),
+            pl.col("preclose").forward_fill(),
+            pl.col("open").forward_fill(),
+            pl.col("high").forward_fill(),
+            pl.col("low").forward_fill(),
+            
+            # 成交量字段：缺失的填充为 0
+            pl.col("volume").fill_null(0),
+            pl.col("amount").fill_null(0.0),
+        ])
+        # 5. 清理上市前的数据
+        # Forward fill 会把 IPO 之前的日期填成 null，这些行应该删掉
+        .drop_nulls(subset=["close"])
+    )
+    
+    # 6. 处理填充后仍然是 Null 的开盘价/最高价等（如果原始数据就有缺失）
+    # 用 close 补齐 open/high/low
+    df_final = df_filled.with_columns([
+        pl.col("open").fill_null(pl.col("close")),
+        pl.col("high").fill_null(pl.col("close")),
+        pl.col("low").fill_null(pl.col("close")),
+    ])
+    
+    print(f"数据填充完成。原始行数: {df.height}, 填充后行数: {df_final.height}")
+    return df_final
