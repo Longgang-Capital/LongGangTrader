@@ -107,7 +107,7 @@ class FactorDataset_di_ii(Dataset):
     """
     PyTorch 数据集，用于基于sarray读取单因子特征和标签（日频数据，支持时间序列）。
     """
-    def __init__(self, feature_path: Union[str, Path], label_path: Union[str, Path], universe: Optional[str] = None, seq_len: int = 1):
+    def __init__(self, feature_path: Union[str, Path], label_path: Union[str, Path,None] = None, universe: Optional[str] = None, seq_len: int = 1):
         print(f"正在读取特征: {feature_path}")
         print(f"正在读取标签: {label_path}")
         self.seq_len = seq_len
@@ -118,8 +118,11 @@ class FactorDataset_di_ii(Dataset):
         # 加载特征数据 (di, ii, n_feat)
         self.X_3d = load_sarray_data(feature_path, copy_on_write=True)
         
-        # 加载标签数据 (di, ii)
-        self.y_2d = load_sarray_data(label_path, copy_on_write=True)
+        if label_path is None:
+            self.y_2d = np.zeros((self.X_3d.shape[0], self.X_3d.shape[1]), dtype=np.float32)
+        else:
+            # 加载标签数据 (di, ii)
+            self.y_2d = load_sarray_data(label_path, copy_on_write=True)
         
         # 获取维度信息
         self.di, self.ii, self.n_feat = self.X_3d.shape
@@ -213,7 +216,7 @@ class FactorDataset_di_ii(Dataset):
 
 
 def get_test_dataloader(feature_path: Union[str, Path],
-                        label_path: Union[str, Path],
+                        label_path: Union[str, Path, None]=None,
                         batch_size: int = 64,
                         num_workers: int = 8,
                         universe: Optional[str] = None,

@@ -138,16 +138,21 @@ fn run_vectorized_backtest_rs(
 
         // c. 获取当日的目标持仓权重（如果有信号且需要调仓）
         if should_rebalance {
-            if let Some(target_weights) = get_target_weights_for_date(&signals_map, &date) {
+            if let Some(target_weights) = get_target_weights_for_date(
+                &signals_map, &date) {
 
                 // 1. 计算交易前权益 (用于确定买多少)
                 // 注意：这里用的是当前持仓在当前价格下的市值 + 现金
-                let pre_trade_holdings_value = calculate_holdings_value(&current_positions, market_data_for_date,&last_known_prices);
+                let pre_trade_holdings_value = calculate_holdings_value(
+                    &current_positions, market_data_for_date,&last_known_prices)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
                 let pre_trade_equity = cash + pre_trade_holdings_value;
                 // d. 计算目标持仓市值
-                let target_values = calculate_target_positions_value(pre_trade_equity, target_weights);
+                let target_values = calculate_target_positions_value(
+                    pre_trade_equity, target_weights);
                 // e. 生成交易指令（包含涨跌停限制）
-                let trades = calculate_trades(&current_positions, &target_values, market_data_for_date, config.limit_pct);
+                let trades = calculate_trades(
+                    &current_positions, &target_values, market_data_for_date, config.limit_pct);
 
                 turnover_rate = calculate_turnover_rate(&trades, pre_trade_equity);
 
@@ -165,7 +170,9 @@ fn run_vectorized_backtest_rs(
         // --- 修正点 2: 会计核算 ---
         // 交易完成后，重新计算持仓市值和总权益
         // 这样 equity 才会反映扣除手续费后的真实净值，且与 cash 对应
-        let final_holdings_value = calculate_holdings_value(&current_positions, market_data_for_date, &last_known_prices);
+        let final_holdings_value = calculate_holdings_value(
+            &current_positions, market_data_for_date, &last_known_prices)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let final_equity = cash + final_holdings_value;
 
         // g. 记录当日的投资组合快照

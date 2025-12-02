@@ -36,7 +36,7 @@ def load_config(yml_path: str | Path) -> dict:
 def inference_on_test_set(
     model_path: str,
     feature_path: str,
-    label_path: str,
+    label_path: Optional[str]=None,
     batch_size: int = 256,
     num_workers: int = 4,
     universe: Optional[str] = None,
@@ -156,7 +156,8 @@ def main():
 
     inference_on_test_set(
         model_path=model_path,
-        data_root=data_root,
+        feature_path=os.path.join(data_root, "test_features.bin"),
+        label_path=None,
         batch_size=batch_size,
         num_workers=num_workers,
         universe=universe,
