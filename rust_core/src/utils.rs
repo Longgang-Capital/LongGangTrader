@@ -70,7 +70,8 @@ pub type PositionMap = HashMap<String, f64>;
 // --- 新增的数据预处理函数 ---
 
 /// 将输入的 market_data DataFrame 转换为 HashMap, 以便按日期快速访问
-pub fn preprocess_market_data(df: &DataFrame, config: &BacktestConfig) -> PolarsResult<HashMap<String, DailyMarketData>> {
+pub fn preprocess_market_data(df: &DataFrame, config: &BacktestConfig) -> PolarsResult<HashMap<String,
+        DailyMarketData>> {
     let mut map = HashMap::new();
     let date_col = get_date_column_as_string(df, &config.date_col)?;
     let symbol_col = df.column(&config.symbol_col)?.str()?;
@@ -79,34 +80,33 @@ pub fn preprocess_market_data(df: &DataFrame, config: &BacktestConfig) -> Polars
     let preclose_col = df.column(&config.preclose_col)?.f64()?;
 
     for i in 0..df.height() {
-        let date = date_col.get(i).unwrap().to_string();
-        let symbol = symbol_col.get(i).unwrap().to_string();
-        let close = close_col.get(i).unwrap();
-        let volume = volume_col.get(i).unwrap_or(0);
-        let preclose = preclose_col.get(i).unwrap_or(0.0);
-        
-        map.entry(date)
-           .or_insert_with(HashMap::new)
-           .insert(symbol, MarketDataEntry { price: close, volume, preclose });
+        if let (Some(date), Some(symbol), Some(close)) = (date_col.get(i), symbol_col.get(i), close_col.get(i)) {
+            let volume = volume_col.get(i).unwrap_or(0);
+            let preclose = preclose_col.get(i).unwrap_or(0.0);
+            
+            map.entry(date.to_string())
+               .or_insert_with(HashMap::new)
+               .insert(symbol.to_string(), MarketDataEntry { price: close, volume, preclose });
+        }
     }
     Ok(map)
 }
 
 /// 将输入的 signals DataFrame 转换为 HashMap, 以便按日期快速访问
-pub fn preprocess_signals(df: &DataFrame, config: &BacktestConfig) -> PolarsResult<HashMap<String, DailySignalData>> {
+pub fn preprocess_signals(df: &DataFrame, config: &BacktestConfig) -> PolarsResult<HashMap<String, 
+        DailySignalData>> {
     let mut map = HashMap::new();
     let date_col = get_date_column_as_string(df, &config.date_col)?;
     let symbol_col = df.column(&config.symbol_col)?.str()?;
     let weight_col = df.column(&config.weight_col)?.f64()?;
 
     for i in 0..df.height() {
-        let date = date_col.get(i).unwrap().to_string();
-        let symbol = symbol_col.get(i).unwrap().to_string();
-        let weight = weight_col.get(i).unwrap();
-        
-        map.entry(date)
-           .or_insert_with(HashMap::new)
-           .insert(symbol, weight);
+        if let (Some(date), Some(symbol), Some(weight)) = (date_col.get(i),
+         symbol_col.get(i), weight_col.get(i)) {
+            map.entry(date.to_string())
+                .or_insert_with(HashMap::new)
+                .insert(symbol.to_string(), weight);
+        }
     }
     Ok(map)
 }
@@ -129,7 +129,7 @@ pub fn calculate_holdings_value(
     current_positions: &PositionMap,
     market_data_for_date: &DailyMarketData,
     last_known_prices: &HashMap<String, f64>
-) -> f64 {
+) -> PolarsResult<f64> {
     current_positions.iter()
         .map(|(symbol, &shares)| {
             // 优先获取当日价格
@@ -137,13 +137,16 @@ pub fn calculate_holdings_value(
                     entry.price
                 } else {
                     // 当日无数据，尝试获取"最后已知价格" (相当于停牌时的昨收)
-                    *last_known_prices.get(symbol).expect("Missing market data for held symbol!")
+                    *last_known_prices.get(symbol).ok_or_else(|| PolarsError::ComputeError(
+                        format!("Can't find price for symbol '{}' in current market data or in 
+                        last known prices.", symbol).into()
+                    ))?
                 };
             
             // 如果连历史价格都没有，那就真的只能算0了(或者报错)
-            shares * price
+            Ok(shares * price)
         })
-        .sum()
+        .sum::<PolarsResult<f64>>()
     
 }
 
@@ -258,7 +261,8 @@ pub fn build_results_dataframe_from_history(
     let turnover_rate_series = Series::new("turnover_rate".into(), turnover_rates);
 
     // 组合成 DataFrame
-    DataFrame::new(vec![date_series.into(), equity_series.into(), cash_series.into(), holdings_value_series.into(), turnover_rate_series.into()])
+    DataFrame::new(vec![date_series.into(), equity_series.into(), cash_series.into(), 
+    holdings_value_series.into(), turnover_rate_series.into()])
 }
 
 /// 根据当天的交易列表和总资产计算换手率
@@ -286,30 +290,42 @@ pub struct BinFileMetadata {
 pub fn load_market_data(market_data_path: &str) -> PyResult<DataFrame> {
     match Path::new(market_data_path).extension().and_then(|s| s.to_str()) {
         Some("parquet") => {
-            let file = File::open(market_data_path).map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-            ParquetReader::new(file).finish().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+            let file = File::open(market_data_path).map_err(|e| 
+                PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+            ParquetReader::new(file).finish().map_err(|e| 
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
         },
         Some("csv") => {
-            let file = File::open(market_data_path).map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-            CsvReader::new(file).finish().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+            let file = File::open(market_data_path).map_err(|e| 
+                PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+            CsvReader::new(file).finish().map_err(|e| 
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
         },
         Some("bin") => {
             let json_path = Path::new(market_data_path).with_extension("bin.json");
-            let json_file = File::open(&json_path).map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("Failed to open companion JSON file: {}", e)))?;
-            let metadata: BinFileMetadata = serde_json::from_reader(json_file).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse JSON metadata: {}", e)))?;
+            let json_file = File::open(&json_path).map_err(|e|
+                 PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("Failed to open companion JSON file: {}", e)))?;
+            let metadata: BinFileMetadata = serde_json::from_reader(json_file)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Failed to parse JSON metadata: {}", e)))?;
 
             if metadata.dtype != "<f4" {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Unsupported .bin dtype, only '<f4' (f32) supported.".to_string()));
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Unsupported .bin dtype, only '<f4' (f32) supported.".to_string()));
             }
             if metadata.shape.len() != 2 {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Unsupported .bin shape, only 2D arrays supported.".to_string()));
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Unsupported .bin shape, only 2D arrays supported.".to_string()));
             }
 
-            let mut file = File::open(market_data_path).map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+            let mut file = File::open(market_data_path).map_err(|e|
+                 PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
             let mut buffer: Vec<u8> = Vec::new();
-            file.read_to_end(&mut buffer).map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+            file.read_to_end(&mut buffer).map_err(|e|
+                 PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
             
-            let data: Vec<f32> = buffer.chunks_exact(4).map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap())).collect();
+            let data: Vec<f32> = buffer.chunks_exact(4).map(|chunk| 
+                f32::from_le_bytes(chunk.try_into().unwrap())).collect();
             
             let cols = metadata.shape[1];
             let series: Vec<Series> = (0..cols).map(|i| {
@@ -321,11 +337,15 @@ pub fn load_market_data(market_data_path: &str) -> PyResult<DataFrame> {
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
         },
         Some("pkl") => {
-            let file = File::open(market_data_path).map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-            let data: Vec<HashMap<String, serde_pickle::Value>> = serde_pickle::from_reader(file).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to deserialize .pkl file: {}", e)))?;
+            let file = File::open(market_data_path).map_err(|e| 
+                PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+            let data: Vec<HashMap<String, serde_pickle::Value>> = serde_pickle::from_reader(file)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Failed to deserialize .pkl file: {}", e)))?;
             
             if data.is_empty() {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Pickle file is empty or in an unsupported format.".to_string()));
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Pickle file is empty or in an unsupported format.".to_string()));
             }
 
             let columns: Vec<String> = data[0].keys().cloned().collect();
@@ -349,6 +369,7 @@ pub fn load_market_data(market_data_path: &str) -> PyResult<DataFrame> {
             DataFrame::new(series_vec.into_iter().map(|s| s.into()).collect())
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
         },
-        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Unsupported file extension: {:?}", market_data_path))),
+        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Unsupported file extension: {:?}", market_data_path))),
     }
 }
