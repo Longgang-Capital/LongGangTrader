@@ -47,6 +47,7 @@ class Backtester:
         self.preclose_col = config.get("preclose_col", "preclose")
         self.limit_pct = config.get("limit_pct", 0.1)
         self.rebalance_days = config.get("rebalance_days", 1)  # 调仓天数，默认为1（每日调仓）
+        self.start_date = config.get("start_date", "")  # 交易起始时间，格式 "%Y-%m-%d"，默认为空（不限制）
 
         self.portfolio_history = None
 
@@ -71,7 +72,8 @@ class Backtester:
             volume_col=self.volume_col,
             preclose_col=self.preclose_col,
             limit_pct=self.limit_pct,
-            rebalance_days=self.rebalance_days
+            rebalance_days=self.rebalance_days,
+            start_date=self.start_date
         )
         if isinstance(signals, pd.DataFrame):
             signals_pl = pl.from_pandas(signals)
@@ -133,29 +135,40 @@ class Backtester:
 
         df['strategy_net_value'] = df['equity'] / self.initial_capital
 
-        # 年化收益率
+        # 计算总收益率和时间
         total_return = df['strategy_net_value'].iloc[-1] - 1.0
         days = (df[self.date_col].iloc[-1] - df[self.date_col].iloc[0]).days
+        years = days / 365.0 if days > 0 else 1.0
+        
+        # 复利年化收益率: (1 + total_return)^(1/years) - 1
         if days == 0:
-            annualized_return = 0.0
+            annualized_return_compound = 0.0
         else:
-            annualized_return = (1 + total_return) ** (365.0 / days) - 1
+            annualized_return_compound = (1 + total_return) ** (1.0 / years) - 1
+        
+        # 单利年化收益率: total_return / years
+        if days == 0:
+            annualized_return_simple = 0.0
+        else:
+            annualized_return_simple = total_return / years
         
         # 最大回撤
         df['cum_max'] = df['strategy_net_value'].cummax()
         df['drawdown'] = df['strategy_net_value'] / df['cum_max'] - 1
         max_drawdown = df['drawdown'].min()
 
-        # 夏普比率
+        # 夏普比率 (使用复利年化收益率)
         daily_returns = df['strategy_net_value'].pct_change().dropna()
         annualized_std = daily_returns.std() * np.sqrt(252)
         risk_free_rate = 0.01
 
-        excess_return_annualized = annualized_return - risk_free_rate
+        excess_return_annualized = annualized_return_compound - risk_free_rate
         sharpe_ratio = excess_return_annualized / annualized_std if annualized_std != 0 else np.nan
         
         return {
-            "annualized_return": annualized_return,
+            "annualized_return_compound": annualized_return_compound,  # 复利年化
+            "annualized_return_simple": annualized_return_simple,      # 单利年化
+            "total_return": total_return,                              # 总收益率
             "max_drawdown": max_drawdown,
             "sharpe_ratio": sharpe_ratio,
         }
@@ -206,11 +219,13 @@ class Backtester:
         ax.legend(loc='upper left', fontsize=10)
 
         #在图表上显示指标
-        stats_text = (f"年化收益率: {metrics['annualized_return']:.2%}\n"
+        stats_text = (f"复利年化收益率: {metrics['annualized_return_compound']:.2%}\n"
+                    f"单利年化收益率: {metrics['annualized_return_simple']:.2%}\n"
+                    f"总收益率: {metrics['total_return']:.2%}\n"
                     f"最大回撤: {metrics['max_drawdown']:.2%}\n"
                     f"夏普比率: {metrics['sharpe_ratio']:.2f}")
 
-        ax.text(0.01,0.90,stats_text, transform=ax.transAxes, fontsize=10,
+        ax.text(0.01,0.88,stats_text, transform=ax.transAxes, fontsize=10,
         verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
         plt.tight_layout()
 

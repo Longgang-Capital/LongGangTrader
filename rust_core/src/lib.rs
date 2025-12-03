@@ -41,6 +41,9 @@ pub struct BacktestConfig {
 
     #[pyo3(get, set)]
     pub rebalance_days: i32, // 调仓天数，1表示每日调仓，N表示每N天调仓
+
+    #[pyo3(get, set)]
+    pub start_date: String, // 交易起始时间，格式 "%Y-%m-%d"，空字符串表示不限制
 }
 
 #[pymethods]
@@ -48,7 +51,7 @@ impl BacktestConfig {
     #[new] // 这个构造函数允许在 Python 中通过 `BacktestConfig()` 创建实例
     #[pyo3(signature = (initial_capital, transaction_cost_pct, 
         symbol_col, date_col, close_col, weight_col, volume_col, preclose_col, 
-        limit_pct=0.1, rebalance_days=1))]
+        limit_pct=0.1, rebalance_days=1, start_date="".to_string()))]
     fn new(
         initial_capital: f64,
         transaction_cost_pct: f64,
@@ -60,6 +63,7 @@ impl BacktestConfig {
         preclose_col: String,
         limit_pct: f64,
         rebalance_days: i32,
+        start_date: String,
     ) -> Self {
         BacktestConfig {
             initial_capital,
@@ -72,6 +76,7 @@ impl BacktestConfig {
             preclose_col,
             limit_pct,
             rebalance_days,
+            start_date,
         }
     }
 }

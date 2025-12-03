@@ -82,7 +82,7 @@ pub fn preprocess_market_data(df: &DataFrame, config: &BacktestConfig) -> Polars
     for i in 0..df.height() {
         if let (Some(date), Some(symbol), Some(close)) = (date_col.get(i), symbol_col.get(i), close_col.get(i)) {
             let volume = volume_col.get(i).unwrap_or(0);
-            let preclose = preclose_col.get(i).unwrap_or(0.0);
+            let preclose = preclose_col.get(i).unwrap_or(close);
             
             map.entry(date.to_string())
                .or_insert_with(HashMap::new)
@@ -111,13 +111,19 @@ pub fn preprocess_signals(df: &DataFrame, config: &BacktestConfig) -> PolarsResu
     Ok(map)
 }
 
-/// 从市场数据中获取所有排序且唯一的日期
+/// 从市场数据中获取所有排序且唯一的日期，支持按 start_date 过滤
 pub fn get_sorted_unique_dates(df: &DataFrame, config: &BacktestConfig) -> PolarsResult<Vec<String>> {
     let date_col = get_date_column_as_string(df, &config.date_col)?;
     let mut unique_dates: Vec<String> = date_col.unique()?.into_iter().filter_map(
         |opt| opt.map(|s| s.to_string())
     ).collect();
     unique_dates.sort();
+    
+    // 如果设置了 start_date，则过滤掉早于 start_date 的日期
+    if !config.start_date.is_empty() {
+        unique_dates.retain(|date| date.as_str() >= config.start_date.as_str());
+    }
+    
     Ok(unique_dates)
 }
 

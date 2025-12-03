@@ -423,3 +423,170 @@ class RollingTopQuantileStrategy(BaseStrategy):
         }
 
         return target_weights
+
+
+class RollingMeanStdBreakoutStrategy(BaseStrategy):
+    """
+    基于滚动均值+标准差突破的信号加权策略。
+    
+    逻辑：
+    1. 对因子值进行短期滚动平均 (如 20 日)。
+    2. 对因子值计算长期滚动均值和标准差 (如 120 日)。
+    3. 开仓条件: (短期均值 > 长期均值 + k * 长期标准差) & (短期均值 > 0)
+    4. 按照预测值占比进行归一化加权 (Signal Strength Weighting)。
+    """
+    def __init__(self, factor_data, config: Optional[dict] = None):
+        super().__init__(factor_data, config)
+        # 获取配置参数
+        self.short_window = self.config.get("short_window", 20)      # 短期平滑窗口，默认20日
+        self.long_window = self.config.get("long_window", 120)       # 长期滚动窗口，默认120日
+        self.std_multiplier = self.config.get("std_multiplier", 1.5) # 标准差倍数，默认1.5
+        self.min_score = self.config.get("min_score", 0.0)           # 绝对值门槛，默认 > 0
+
+    def generate_signals_for_all_dates(self):
+        """
+        为所有日期一次性生成信号 (推荐使用此方法，效率最高)。
+        """
+        # 1. 计算短期滚动均值 (preds_ma20)
+        data = (
+            self.factor_data
+            .clone()
+            .sort([self.symbol_col, self.date_col])
+            .with_columns(
+                pl.col(self.factor_value_col)
+                .rolling_mean(window_size=self.short_window)
+                .over(self.symbol_col)
+                .alias("short_ma")
+            )
+        )
+        
+        # 2. 计算长期滚动均值和标准差 (rolling120_mean, rolling120_std)
+        data = data.with_columns([
+            pl.col(self.factor_value_col)
+            .rolling_mean(window_size=self.long_window)
+            .over(self.symbol_col)
+            .alias("long_ma"),
+            pl.col(self.factor_value_col)
+            .rolling_std(window_size=self.long_window)
+            .over(self.symbol_col)
+            .alias("long_std"),
+        ])
+        
+        # 3. 计算动态阈值: long_ma + std_multiplier * long_std
+        data = data.with_columns(
+            (pl.col("long_ma") + self.std_multiplier * pl.col("long_std")).alias("threshold")
+        )
+        
+        # 4. 构造开仓条件 mask: (short_ma > threshold) & (short_ma > min_score)
+        signals = (
+            data.filter(
+                pl.col("short_ma").is_not_null()
+                & pl.col("threshold").is_not_null()
+                & (pl.col("short_ma") > pl.col("threshold"))
+                & (pl.col("short_ma") > self.min_score)
+            )
+            # 5. 计算归一化权重: short_ma / sum(short_ma) per day
+            .with_columns(
+                pl.col("short_ma").sum().over(self.date_col).alias("_score_sum")
+            )
+            .with_columns(
+                pl.when(pl.col("_score_sum") > 0)
+                .then(pl.col("short_ma") / pl.col("_score_sum"))
+                .otherwise(None)
+                .alias(self.weight_col)
+            )
+            .filter(pl.col(self.weight_col).is_not_null())
+            .select([self.date_col, self.symbol_col, self.weight_col])
+        )
+
+        # 打印统计信息
+        total_days = (
+            signals.select(pl.col(self.date_col).n_unique()).item()
+            if not signals.is_empty()
+            else 0
+        )
+        avg_positions = signals.height / total_days if total_days else 0.0
+
+        print(
+            f"\n生成的交易信号 (Rolling Mean+{self.std_multiplier}Std Breakout Strategy):"
+        )
+        print(f"短期窗口: {self.short_window}, 长期窗口: {self.long_window}")
+        print(f"总交易日数: {total_days}")
+        print(f"平均每日持仓数: {avg_positions:.2f}")
+        print("信号数据预览:")
+        print(signals.head())
+
+        return signals
+
+    def generate_signals(self, current_date, current_positions):
+        """
+        根据当前日期生成信号（单步模式）。
+        注意：由于涉及滚动计算，单步模式需要回溯历史数据，效率较低。
+        """
+        # 1. 筛选相关历史数据
+        history_data = self.factor_data.filter(pl.col(self.date_col) <= current_date)
+
+        # 性能优化：检查数据是否足够
+        unique_days = (
+            history_data.select(pl.col(self.date_col).n_unique()).item()
+            if not history_data.is_empty()
+            else 0
+        )
+        if unique_days < self.long_window:
+            return {}  # 数据不足以计算长期滚动均值
+
+        # 2. 计算滚动指标
+        history_with_scores = (
+            history_data
+            .sort([self.symbol_col, self.date_col])
+            .with_columns([
+                pl.col(self.factor_value_col)
+                .rolling_mean(window_size=self.short_window)
+                .over(self.symbol_col)
+                .alias("short_ma"),
+                pl.col(self.factor_value_col)
+                .rolling_mean(window_size=self.long_window)
+                .over(self.symbol_col)
+                .alias("long_ma"),
+                pl.col(self.factor_value_col)
+                .rolling_std(window_size=self.long_window)
+                .over(self.symbol_col)
+                .alias("long_std"),
+            ])
+        )
+
+        # 3. 计算阈值并筛选当前日期数据
+        current_slice = (
+            history_with_scores
+            .filter(pl.col(self.date_col) == current_date)
+            .with_columns(
+                (pl.col("long_ma") + self.std_multiplier * pl.col("long_std")).alias("threshold")
+            )
+            .drop_nulls(["short_ma", "threshold"])
+        )
+
+        if current_slice.is_empty():
+            return {}
+
+        # 4. 应用开仓条件
+        selected = current_slice.filter(
+            (pl.col("short_ma") > pl.col("threshold"))
+            & (pl.col("short_ma") > self.min_score)
+        )
+
+        if selected.is_empty():
+            return {}
+
+        # 5. 计算归一化权重
+        total_score_df = selected.select(pl.col("short_ma").sum())
+        total_score = total_score_df.item() if total_score_df.height else None
+
+        if total_score is None or total_score <= 0:
+            return {}
+
+        target_weights = {
+            row[self.symbol_col]: row["short_ma"] / total_score
+            for row in selected.iter_rows(named=True)
+        }
+
+        return target_weights
