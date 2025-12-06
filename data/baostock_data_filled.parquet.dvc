@@ -1,0 +1,5 @@
+outs:
+- md5: 21e004fb171da10677e04e3e5b65740c
+  size: 70744037
+  hash: md5
+  path: baostock_data_filled.parquet
